@@ -1,0 +1,9 @@
+{
+  "identifier": "ytm",
+  "description": "Let the YouTube Music engine window emit events to Rust and hear ui-ready",
+  "windows": ["ytm"],
+  "remote": {
+    "urls": ["https://music.youtube.com", "https://*.youtube.com"]
+  },
+  "permissions": ["core:event:allow-emit", "core:event:allow-listen"]
+}
