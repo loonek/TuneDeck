@@ -1,8 +1,8 @@
 [package]
 name = "tunedeck"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A desktop YouTube Music client and companion to the TuneFrame display."
+authors = ["lunek"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -23,6 +23,19 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4.10.1"
+ureq = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+discord-rich-presence = "0.2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-window-state = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+
+[features]
+# Demo build: no hidden YTM engine, no login, no network. The UI runs on labelled
+# placeholder data (see is_demo + the demo bootstrap in src/main.js). For screenshots.
+demo = []
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

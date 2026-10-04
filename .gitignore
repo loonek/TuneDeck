@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# local-only plugins (e.g. ad skipper) - not shipped/advertised
+plugins-local/
+
+# Tauri updater signing key - NEVER commit the private key or its password.
+# (The PUBLIC key in src-tauri/tauri.conf.json is meant to be committed.)
+*.key
+*.key.pub
+.env
+.env.*
+!.env.example

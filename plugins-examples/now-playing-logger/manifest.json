@@ -1,0 +1,9 @@
+{
+  "id": "now-playing-logger",
+  "label": "Now Playing Logger",
+  "description": "Logs the current track to the console (example plugin).",
+  "version": "1.0",
+  "fields": [
+    { "key": "greeting", "label": "Greeting", "hint": "prefix before the title", "kind": "text", "default": "Now playing", "options": [], "advanced": false }
+  ]
+}

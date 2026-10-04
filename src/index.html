@@ -40,7 +40,13 @@
             <button class="iconbtn" id="settingsBtn" title="Settings" aria-label="Settings">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0v-.2a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H1a2 2 0 0 1 0-4h.2a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 0 1 4 0v.2a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.2a1.6 1.6 0 0 0-1.4 1z"/></svg>
             </button>
-            <div class="avatar">Q</div>
+            <div class="account" id="account">
+              <div class="avatar" aria-label="Account"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0 2c-4.4 0-8 2.5-8 5.5V21h16v-1.5c0-3-3.6-5.5-8-5.5z"/></svg></div>
+              <div class="account-menu">
+                <button id="acctSwitch" hidden>Switch account</button>
+                <button id="acctAction">Log in</button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -133,34 +139,74 @@
           <button id="settingsClose" aria-label="Close"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </header>
         <div class="body">
-          <div class="field">
-            <label class="k">Playback</label>
-            <div class="opt-row">
-              <span>Audio only <span class="opt-hint">force the Song version, skip video</span></span>
-              <span class="switch"><input type="checkbox" id="audioOnly"><label for="audioOnly"></label></span>
+          <div class="set-tabs">
+            <button data-set="general" class="on">General</button>
+            <button data-set="device">Device / Serial</button>
+            <button data-set="plugins">Plugins</button>
+          </div>
+
+          <div id="setGeneral">
+            <div class="field">
+              <label class="k">Theme</label>
+              <div class="seg" id="themeSeg">
+                <button data-theme-opt="system">System</button>
+                <button data-theme-opt="light">Light</button>
+                <button data-theme-opt="dark">Dark</button>
+              </div>
+            </div>
+            <div class="field">
+              <label class="k">Accent</label>
+              <div class="swatches" id="swatches">
+                <button class="swatch" style="background:#e5253c" data-accent="#e5253c" aria-pressed="true" title="Red"></button>
+                <button class="swatch" style="background:#1ec9a5" data-accent="#1ec9a5" aria-pressed="false" title="Teal"></button>
+                <button class="swatch" style="background:#7c6cff" data-accent="#7c6cff" aria-pressed="false" title="Violet"></button>
+                <button class="swatch" style="background:#f5a524" data-accent="#f5a524" aria-pressed="false" title="Amber"></button>
+                <button class="swatch" style="background:#4f9dff" data-accent="#4f9dff" aria-pressed="false" title="Blue"></button>
+                <button class="swatch custom" title="Custom color">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                  <input type="color" id="customColor" value="#4f9dff" />
+                </button>
+              </div>
             </div>
           </div>
-          <div class="field">
-            <label class="k">Theme</label>
-            <div class="seg" id="themeSeg">
-              <button data-theme-opt="system">System</button>
-              <button data-theme-opt="light">Light</button>
-              <button data-theme-opt="dark">Dark</button>
+
+          <div id="setDevice" hidden>
+            <div class="field">
+              <label class="k">Connection</label>
+              <div class="opt-row">
+                <span>Serial port <span class="opt-hint">pick your board, or leave on Auto</span></span>
+                <select id="serialPort" class="port-select"><option value="">Auto-detect</option></select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="k">Display &amp; controls</label>
+              <div class="opt-row">
+                <span>Subtitles <span class="opt-hint">text sent to the device</span></span>
+                <select id="serialSub" class="port-select">
+                  <option value="short">Short</option>
+                  <option value="full">Full byline</option>
+                </select>
+              </div>
+              <div class="opt-row">
+                <span>Volume step <span class="opt-hint">how the device's +/- behaves</span></span>
+                <select id="serialVol" class="port-select">
+                  <option value="snap">Snap to 10s</option>
+                  <option value="fine">Fine (+/- 5)</option>
+                </select>
+              </div>
+              <div class="opt-row">
+                <span>Fine at low volume <span class="opt-hint">gentle 1-step control below 10</span></span>
+                <span class="switch"><input type="checkbox" id="serialVolLow"><label for="serialVolLow"></label></span>
+              </div>
+            </div>
+            <div class="field">
+              <label class="k">Feed sections <span class="opt-hint">which home sections reach the device</span></label>
+              <div id="serialFeedSections" class="feed-pick"></div>
             </div>
           </div>
-          <div class="field">
-            <label class="k">Accent</label>
-            <div class="swatches" id="swatches">
-              <button class="swatch" style="background:#e5253c" data-accent="#e5253c" aria-pressed="true" title="Red"></button>
-              <button class="swatch" style="background:#1ec9a5" data-accent="#1ec9a5" aria-pressed="false" title="Teal"></button>
-              <button class="swatch" style="background:#7c6cff" data-accent="#7c6cff" aria-pressed="false" title="Violet"></button>
-              <button class="swatch" style="background:#f5a524" data-accent="#f5a524" aria-pressed="false" title="Amber"></button>
-              <button class="swatch" style="background:#4f9dff" data-accent="#4f9dff" aria-pressed="false" title="Blue"></button>
-              <button class="swatch custom" title="Custom color">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-                <input type="color" id="customColor" value="#4f9dff" />
-              </button>
-            </div>
+
+          <div id="setPlugins" hidden>
+            <div id="pluginsList"></div>
           </div>
         </div>
       </div>

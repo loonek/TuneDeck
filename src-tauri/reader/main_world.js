@@ -1,11 +1,11 @@
 (function ()
 {
   // YTM registers a beforeunload handler; a capturing listener that stops propagation
-  // runs first and prevents its "unsaved changes" prompt on our navigations.
+  // runs first and suppresses its "unsaved changes" prompt on navigations.
   window.addEventListener("beforeunload", (e) => e.stopImmediatePropagation(), true);
 
-  // If we arrived here with shuffle intent, turn shuffle on once the player is ready, then
-  // skip one (the list autoplays in order first).
+  // When the page was opened with shuffle intent, turn shuffle on once the player is ready,
+  // then skip one (the list autoplays in order first).
   try
   {
     if (sessionStorage.getItem("tunedeckShuffle"))
@@ -404,14 +404,18 @@
         }
       }
       catch (e) {}
-      if (!shuffle || !shuffle.playlistId) continue;
 
       let openId = null;
       try { openId = it.navigationEndpoint.browseEndpoint.browseId; } catch (e) {}
+      // Skip non-playlist tiles (e.g. the "New playlist" button). An EMPTY playlist has a browseId
+      // but no "Shuffle play" item, so don't gate on shuffle - that dropped freshly created ones.
+      if (!openId && !(shuffle && shuffle.playlistId)) continue;
+      const pid = (shuffle && shuffle.playlistId) ? shuffle.playlistId : String(openId).replace(/^VL/, "");
+
       items.push({
         title: firstRun(it.title),
         sub: joinRuns(it.subtitle).split(" • ")[0],
-        id: shuffle.playlistId,
+        id: pid,
         openId: openId,
         kind: "s",
         thumb: thumbUrl(it.thumbnailRenderer),
@@ -544,7 +548,7 @@
     }
     catch (e) { console.warn("[editPlaylist] failed", e); return false; }
   }
-  // action: "add" (a=videoId) | "remove" (a=setVideoId, b=videoId) | "move" (a=movedSetVideoId, b=beforeSetVideoId; b empty = to end)
+  // action: "add" (a=videoId) | "remove" (a=setVideoId, b=videoId) | "move" (a=setVideoId moved, b=setVideoId placed before; b empty = to end)
   window.__tunedeckPlaylistEdit = function (action, playlistId, a, b)
   {
     let actions;
@@ -552,12 +556,151 @@
     else if (action === "remove") actions = [{ action: "ACTION_REMOVE_VIDEO", setVideoId: a, removedVideoId: b }];
     else if (action === "move")
     {
-      const m = { action: "ACTION_MOVE_VIDEO_BEFORE", setVideoId: a, movedSetVideoId: a };
-      if (b) m.beforeSetVideoId = b;
+      const m = { action: "ACTION_MOVE_VIDEO_BEFORE", setVideoId: a };
+      if (b) m.movedSetVideoIdSuccessor = b;   // destination: the item the moved track should precede
       actions = [m];
     }
     else return;
     return editPlaylist(playlistId, actions);
+  };
+
+  // Creates a new playlist. privacy: "PRIVATE" | "UNLISTED" | "PUBLIC". Returns the new id ("" on fail).
+  async function createPlaylist(title, privacy)
+  {
+    const key = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_API_KEY") : null;
+    const ctx0 = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_CONTEXT") : null;
+    if (!key || !ctx0 || !title) return "";
+    const ctx = JSON.parse(JSON.stringify(ctx0));
+    const headers = await authHeaders();
+    try
+    {
+      const resp = await fetch(`/youtubei/v1/playlist/create?key=${key}&prettyPrint=false`,
+        { method: "POST", headers: headers, body: JSON.stringify({ context: ctx, title: title, privacyStatus: privacy || "PRIVATE" }) }).then((r) => r.json());
+      return (resp && resp.playlistId) || "";
+    }
+    catch (e) { console.warn("[createPlaylist] failed", e); return ""; }
+  }
+  window.__tunedeckCreatePlaylist = async function (title, privacy)
+  {
+    const id = await createPlaylist(title, privacy);
+    if (id)
+    {
+      const vl = String(id).indexOf("VL") === 0 ? id : "VL" + id;
+      const pid = String(id).replace(/^VL/, "");
+      // Keeps the new playlist present in the list even while the server library still lags behind.
+      const ensureNew = (items) =>
+      {
+        const arr = Array.isArray(items) ? items.slice() : [];
+        if (!arr.some((p) => p.id === pid || p.openId === vl))
+          arr.unshift({ title: title, sub: "Playlist", id: pid, openId: vl, kind: "s", thumb: "" });
+        return arr;
+      };
+      // optimistic: show it immediately; then reconcile with the server (now + once more, it can lag)
+      lastPlaylists = ensureNew(lastPlaylists);
+      window.__TAURI__?.event?.emit("ytm-playlists", lastPlaylists);
+      const refresh = async () =>
+      {
+        try { const pls = await fetchLibraryPlaylists(); if (pls) { lastPlaylists = ensureNew(pls.items || []); window.__TAURI__?.event?.emit("ytm-playlists", lastPlaylists); } } catch (e) {}
+      };
+      refresh();
+      setTimeout(refresh, 1500);
+      window.__TAURI__?.event?.emit("ytm-playlist-created", { id: id, title: title });
+    }
+    return id;
+  };
+
+  // Deletes a playlist (auth). Returns true on success.
+  async function deletePlaylist(playlistId)
+  {
+    const key = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_API_KEY") : null;
+    const ctx0 = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_CONTEXT") : null;
+    if (!key || !ctx0 || !playlistId) return false;
+    const ctx = JSON.parse(JSON.stringify(ctx0));
+    const headers = await authHeaders();
+    const pid = String(playlistId).replace(/^VL/, "");
+    try
+    {
+      const resp = await fetch(`/youtubei/v1/playlist/delete?key=${key}&prettyPrint=false`,
+        { method: "POST", headers: headers, body: JSON.stringify({ context: ctx, playlistId: pid }) }).then((r) => r.json());
+      return resp && resp.status === "STATUS_SUCCEEDED";
+    }
+    catch (e) { console.warn("[deletePlaylist] failed", e); return false; }
+  }
+  window.__tunedeckDeletePlaylist = async function (playlistId)
+  {
+    const ok = await deletePlaylist(playlistId);
+    if (ok)
+    {
+      const pid = String(playlistId).replace(/^VL/, "");
+      // Keeps the deleted playlist out even while the server library still lists it (it can lag).
+      const strip = (items) => (Array.isArray(items) ? items : []).filter((p) => p.id !== pid && p.openId !== ("VL" + pid) && p.openId !== playlistId);
+      lastPlaylists = strip(lastPlaylists);
+      window.__TAURI__?.event?.emit("ytm-playlists", lastPlaylists);
+      const refresh = async () =>
+      {
+        try { const pls = await fetchLibraryPlaylists(); if (pls) { lastPlaylists = strip(pls.items || []); window.__TAURI__?.event?.emit("ytm-playlists", lastPlaylists); } } catch (e) {}
+      };
+      refresh();
+      setTimeout(refresh, 2000);
+      window.__TAURI__?.event?.emit("ytm-playlist-deleted", { id: playlistId });
+    }
+    return ok;
+  };
+
+  // Reads one library browse page (grid of two-row tiles OR a shelf of list rows) into tiles.
+  async function libraryGrid(key, headers, ctx, browseId)
+  {
+    const items = [];
+    let resp;
+    try { resp = await browse(key, headers, { context: ctx, browseId: browseId }); }
+    catch (e) { return items; }
+    let sl;
+    try { sl = resp.contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents; }
+    catch (e) { return items; }
+    for (const sec of sl || [])
+    {
+      if (sec.gridRenderer)
+      {
+        for (const g of sec.gridRenderer.items || [])
+          if (g.musicTwoRowItemRenderer) items.push(parseTwoRow(g.musicTwoRowItemRenderer));
+      }
+      else if (sec.musicShelfRenderer)
+      {
+        for (const c of sec.musicShelfRenderer.contents || [])
+          if (c.musicResponsiveListItemRenderer) items.push(parseListRow(c.musicResponsiveListItemRenderer));
+      }
+    }
+    return items.filter((x) => x.title && x.id);
+  }
+
+  // Builds the Library view: the user's playlists, saved albums and subscribed artists,
+  // split into sections (mirrors YTM's own library, grouped like the feed).
+  async function fetchLibrary()
+  {
+    const key = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_API_KEY") : null;
+    const ctx0 = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_CONTEXT") : null;
+    if (!key || !ctx0) return { sections: [] };
+    const ctx = JSON.parse(JSON.stringify(ctx0));
+    try { ctx.client.hl = "en"; } catch (e) {}
+    const headers = await authHeaders();
+
+    const sections = [];
+    const pls = await libraryGrid(key, headers, ctx, "FEmusic_liked_playlists");
+    if (pls.length) sections.push({ title: "Playlists", route: "playlist", items: pls });
+    const albums = await libraryGrid(key, headers, ctx, "FEmusic_liked_albums");
+    if (albums.length) sections.push({ title: "Albums", route: "album", items: albums });
+    const subs = await libraryGrid(key, headers, ctx, "FEmusic_library_corpus_artists");
+    if (subs.length) sections.push({ title: "Subscriptions", route: "artist", items: subs });
+    return { sections: sections };
+  }
+  // NOTE: YTM downloads are NOT fetchable via InnerTube. FEmusic_offline returns only a tab shell
+  // whose Downloads tab carries a placeholder continuation (CONTENT_RELOAD_CONTINUATION_TOKEN_DEFAULT);
+  // the web client fills that tab from its local offline store (IndexedDB), and the media is
+  // DRM-encrypted for YTM's own player. So the Downloads tab stays an informational empty-state.
+  window.__tunedeckOpenLibrary = async function ()
+  {
+    const lib = await fetchLibrary();
+    window.__TAURI__?.event?.emit("ytm-library", lib);
   };
 
   // Fetches an album page by its MPRE browseId. Same twoColumn layout as a playlist, but the
@@ -678,18 +821,104 @@
 
   let lastFeed = null;
   let lastPlaylists = null;
-  let audioOnly = false;
   let lastQueueSig = "";
-  try { audioOnly = localStorage.getItem("tunedeckAudioOnly") === "1"; } catch (e) {}
 
-  // When audio-only is on, keep the Song variant selected over Video (classes are
-  // language-independent; aria-pressed marks the active one).
+  // Always keep the Song variant selected over Video (audio-only is always on now). Classes are
+  // language-independent; aria-pressed marks the active one.
   function enforceAudioOnly()
   {
-    if (!audioOnly) return;
     const song = document.querySelector("ytmusic-av-toggle .song-button");
     if (song && song.getAttribute("aria-pressed") !== "true") song.click();
   }
+
+  // Fetches the full channel list (YouTube channels on one Google account) via InnerTube and
+  // emits it, so TuneDeck renders its own switcher. account_menu returns only the current
+  // account, so use accounts_list, which returns them all.
+  async function fetchAccountsList()
+  {
+    const key = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_API_KEY") : null;
+    const ctx0 = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_CONTEXT") : null;
+    if (!key || !ctx0) return null;
+    const ctx = JSON.parse(JSON.stringify(ctx0));
+    try { ctx.client.hl = "en"; } catch (e) {}
+    const headers = await authHeaders();
+    return fetch(`/youtubei/v1/account/accounts_list?key=${key}&prettyPrint=false`,
+      { method: "POST", headers: headers, body: JSON.stringify({ context: ctx }) }).then((r) => r.json());
+  }
+
+  // Flattens an accounts_list response into [{name, handle, thumb, selected}], one per channel.
+  // The response nests the channels in renderer wrappers, so it walks the whole tree and picks out
+  // every object carrying an accountName, de-duping by name + handle.
+  function collectAccounts(resp)
+  {
+    const out = [], seen = new Set();
+    (function walk(o)
+    {
+      if (!o || typeof o !== "object") return;
+      if (o.accountName)
+      {
+        const name = o.accountName.simpleText || firstRun(o.accountName) || "";
+        const handle = (o.channelHandle && (o.channelHandle.simpleText || firstRun(o.channelHandle)))
+          || (o.accountByline && (o.accountByline.simpleText || firstRun(o.accountByline)))
+          || "";
+        const thumbs = o.accountPhotoThumbnails || (o.accountPhoto && o.accountPhoto.thumbnails) || (o.thumbnail && o.thumbnail.thumbnails) || [];
+        const thumb = thumbs.length ? thumbs[thumbs.length - 1].url : "";
+        const k = name + "|" + handle;
+        if (name && !seen.has(k)) { seen.add(k); out.push({ name: name, handle: handle, thumb: thumb, selected: !!o.isSelected }); }
+      }
+      for (const kk in o) { const v = o[kk]; if (v && typeof v === "object") walk(v); }
+    })(resp);
+    return out;
+  }
+
+  window.__tunedeckLoadAccounts = async function ()
+  {
+    try
+    {
+      const r = await fetchAccountsList();
+      const list = collectAccounts(r) || [];
+      window.__TAURI__?.event?.emit("ytm-accounts", list);
+    }
+    catch (e) { console.log("[TuneDeck] accounts error", e); window.__TAURI__?.event?.emit("ytm-accounts", []); }
+  };
+
+  // Switches the active YouTube channel inside the (hidden) engine by driving YTM's own
+  // switcher: open the account menu, open "Switch account", then click the channel whose text
+  // contains `key` (its @handle - unique). Clicks are confined to the account popups, so it
+  // never hits a sidebar playlist that happens to share a channel's display name.
+  window.__tunedeckSwitchTo = function (key)
+  {
+    const want = String(key || "").toLowerCase();
+    if (!want) return;
+    const inPopup = (el) => !!el.closest("tp-yt-iron-dropdown, ytmusic-menu-popup-renderer, tp-yt-paper-dialog, ytd-multi-page-menu-renderer, ytmusic-multi-page-menu-renderer");
+    const clickable = (el) => el.closest("a, tp-yt-paper-item, ytmusic-compact-link-renderer, ytd-account-item-renderer, ytmusic-account-item-renderer, [role='menuitem'], [role='option']") || el;
+    const b = document.querySelector("ytmusic-settings-button");
+    if (b) (b.querySelector("tp-yt-paper-icon-button, button, a") || b).click();
+    const switchRe = /przełącz kont|switch account|cambiar de cuenta|konto wechseln|wechseln|changer de compte|mudar de conta|trocar de conta|アカウントを切/i;
+    let phase = 0, tries = 0;
+    const iv = setInterval(() =>
+    {
+      tries++;
+      if (phase === 0)
+      {
+        let hit = null;
+        document.querySelectorAll("tp-yt-paper-item, [role='menuitem'], ytmusic-compact-link-renderer, a, yt-formatted-string").forEach((el) =>
+        { if (!hit && inPopup(el) && switchRe.test((el.textContent || "").trim())) hit = el; });
+        if (hit) { clickable(hit).click(); phase = 1; tries = 0; return; }
+      }
+      else
+      {
+        let hit = null;
+        document.querySelectorAll("ytd-account-item-renderer, ytmusic-account-item-renderer, tp-yt-paper-item, [role='menuitem'], [role='option'], a").forEach((el) =>
+        { if (!hit && inPopup(el) && (el.textContent || "").toLowerCase().indexOf(want) !== -1) hit = el; });
+        if (hit) { clickable(hit).click(); clearInterval(iv); return; }
+      }
+      if (tries > 40) clearInterval(iv);
+    }, 100);
+  };
+
+  // Login state, emitted only on change so TuneDeck can show Sign in vs Log out.
+  let lastAuth = null;
 
   // Emit now playing every second
   setInterval(() => {
@@ -700,6 +929,17 @@
       online: navigator.onLine,
       ready: !!(window.ytcfg && window.ytcfg.get && window.ytcfg.get("INNERTUBE_API_KEY"))
     });
+    // Read auth only on the music.youtube.com pages, skipping Google's login/chooser pages.
+    // The key combines signed-in state and the account id, so an account switch re-emits too.
+    if (location.host.indexOf("music.youtube.com") !== -1)
+    {
+      const gi = window.ytcfg && window.ytcfg.get;
+      const li = !!(gi && window.ytcfg.get("LOGGED_IN"));
+      const acct = li && gi ? (window.ytcfg.get("DATASYNC_ID") || window.ytcfg.get("DELEGATED_SESSION_ID") || "") : "";
+      const key = li + "|" + acct;
+      // acct is an opaque YTM id, never a name or email; TuneDeck hashes it only to key per-account UI prefs.
+      if (key !== lastAuth) { lastAuth = key; window.__TAURI__?.event?.emit("ytm-auth", { signedIn: li, acct: acct }); }
+    }
     enforceAudioOnly();
     const q = readQueue();
     const sig = q.map((x) => x.title + x.cur).join("|");
@@ -818,6 +1058,26 @@
     }, 1500);
   })();
 
+  // Re-apply the user's saved volume once the player is ready. A track change does a full engine
+  // reload (play uses location.assign), after which YTM restores ITS own saved volume - this overrides
+  // it back to what the user set in TuneDeck. Persisted in __tunedeckCmd volume / vol_up / vol_down.
+  (function applySavedVol()
+  {
+    let saved = null;
+    try { saved = localStorage.getItem("tunedeckVol"); } catch (e) {}
+    if (saved === null) return;
+    const target = parseInt(saved, 10);
+    if (!(target >= 0)) return;
+    let tries = 0;
+    const iv = setInterval(() =>
+    {
+      const mp = document.getElementById("movie_player");
+      const v = document.querySelector("video");
+      if (mp && mp.setVolume && v && (v.duration > 0 || !v.paused)) { mp.setVolume(target); clearInterval(iv); }
+      if (++tries > 100) clearInterval(iv);
+    }, 200);
+  })();
+
   // Network came back: if the engine has a real YTM (ytcfg present) just re-fetch; if it loaded
   // an offline error page (no ytcfg), reload the engine so it fetches a working page.
   window.addEventListener("online", () =>
@@ -884,22 +1144,36 @@
     }
     else if (action === "volume")
     {
-      if (mp && mp.setVolume) mp.setVolume(value);
+      if (mp && mp.setVolume) { mp.setVolume(value); try { localStorage.setItem("tunedeckVol", String(value)); } catch (e) {} }
+    }
+    else if (action === "vol_up" || action === "vol_down")
+    {
+      // Original TuneFrame feel: snap to the next/previous multiple of 10, with 1-step fine
+      // control near the bottom. (The device sends vol_up / vol_down; stepping lives here.)
+      if (mp && mp.setVolume && mp.getVolume)
+      {
+        let mode = "snap", lowFine = true;
+        try { mode = localStorage.getItem("tunedeckVolMode") || "snap"; } catch (e) {}
+        try { lowFine = (localStorage.getItem("tunedeckVolLowFine") || "1") === "1"; } catch (e) {}
+        const cur = mp.getVolume();
+        const up = action === "vol_up";
+        let nv;
+        // Fine-tuning near the bottom, independent of the step mode (original TuneFrame feel):
+        // up snaps 0->5->10, down steps by 1. Applies below 10 when enabled.
+        if (lowFine && up && cur < 10)        nv = (cur < 5) ? 5 : 10;
+        else if (lowFine && !up && cur <= 10) nv = Math.max(0, cur - 1);
+        else if (mode === "fine")             nv = up ? Math.min(100, cur + 5) : Math.max(0, cur - 5);
+        else                                  nv = up ? Math.min(100, Math.floor(cur / 10) * 10 + 10)
+                                                       : Math.max(0, Math.ceil(cur / 10) * 10 - 10);
+        mp.setVolume(nv);
+        try { localStorage.setItem("tunedeckVol", String(nv)); } catch (e) {}
+      }
     }
   };
 
-  // Called from Rust to toggle audio-only; persists in the engine's own localStorage
-  // so it survives navigation.
-  window.__tunedeckSetAudioOnly = function (on)
-  {
-    audioOnly = !!on;
-    try { localStorage.setItem("tunedeckAudioOnly", on ? "1" : "0"); } catch (e) {}
-    enforceAudioOnly();
-  };
 
-  // Called from Rust to open a playlist: fetch it, emit its data to the UI.
-  // Jumps to the i-th queue row (YTM plays that track). The play handler lives on the
-  // row's inner #play-button, not the host element, so we click that (same as TuneFrame).
+  // Jumps to the i-th queue row (YTM plays that track). The play handler lives on the row's inner
+  // #play-button, not the host element, so that is what gets clicked.
   window.__tunedeckQueueJump = function (index)
   {
     const el = queueRows()[index];
@@ -927,8 +1201,8 @@
       if (rx.test(it.textContent || "")) { it.click(); return; }
     }
   }
-  // "Move to next": native Play next adds a copy after current, so we then remove the
-  // ORIGINAL - the row with the same videoId that is neither the current nor the new copy.
+  // "Move to next": native Play next adds a copy after the current track, so the ORIGINAL is
+  // then removed - the row with the same videoId that is neither the current nor the new copy.
   async function queuePlayNextMove(index)
   {
     const vid = queueRows()[index]?.data?.videoId;
@@ -987,8 +1261,8 @@
 
   window.__tunedeckAction = async function (action, id)
   {
-    // toggles like for the CURRENT song by clicking the engine's own button, so the engine
-    // UI (and our next snapshot) stay in sync. No id needed.
+    // Toggles like for the current song by clicking the engine's own button, so the engine
+    // UI and the next snapshot stay in sync. No id needed.
     if (action === "like-current")
     {
       const bar = document.querySelector("ytmusic-player-bar");

@@ -1,8 +1,8 @@
 // TuneDeck UI.
-// Home sections come live from the hidden engine via the "ytm-feed" event; the
-// mini-player from "ytm-state". Sidebar playlists are still placeholder for now.
+// Home sections arrive from the hidden engine via the "ytm-feed" event, the mini-player via
+// "ytm-state", and the sidebar playlists via "ytm-playlists".
 
-// ---- helpers ----
+// helpers
 function esc(s)
 {
   return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -56,6 +56,198 @@ function closeItemMenu()
 }
 function onDocDown(e) { if (openMenuEl && !openMenuEl.contains(e.target)) closeItemMenu(); }
 
+// "Save to playlist" picker: lists library playlists, adds the given video on pick
+let pickerEl = null;
+function closePlaylistPicker()
+{
+  if (!pickerEl) return;
+  pickerEl.remove();
+  pickerEl = null;
+  document.removeEventListener("keydown", onPickerKey, true);
+}
+function onPickerKey(e) { if (e.key === "Escape") closePlaylistPicker(); }
+
+function openPlaylistPicker(videoId)
+{
+  if (!videoId) return;
+  closePlaylistPicker();
+
+  const back = document.createElement("div");
+  back.className = "picker-back";
+  back.addEventListener("pointerdown", (e) => { if (e.target === back) closePlaylistPicker(); });
+
+  const box = document.createElement("div");
+  box.className = "picker";
+  box.innerHTML = `<header><h3>Save to playlist</h3>
+    <button class="picker-x" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <input class="picker-search" placeholder="Filter playlists" />
+    <div class="picker-list"></div>`;
+
+  const list = box.querySelector(".picker-list");
+  const render = (q) =>
+  {
+    list.innerHTML = "";
+    const ql = (q || "").toLowerCase();
+    const items = playlists.filter((p) => !ql || (p.title || "").toLowerCase().includes(ql));
+    if (!items.length) { list.innerHTML = `<p class="picker-empty">No playlists.</p>`; return; }
+    items.forEach((p, i) =>
+    {
+      const row = document.createElement("button");
+      row.className = "picker-row";
+      const bg = p.thumb
+        ? `background-image:url('${p.thumb}');background-size:cover;background-position:center;`
+        : `background:${cover(i + 2)};`;
+      row.innerHTML = `<span class="picker-th" style="${bg}"></span><span class="picker-n">${esc(p.title)}</span>`;
+      row.addEventListener("click", () =>
+      {
+        playlistEdit("add", p.openId || p.id, videoId);   // reader strips any VL prefix
+        toast(`Added to ${p.title}`);
+        closePlaylistPicker();
+      });
+      list.appendChild(row);
+    });
+  };
+  render("");
+  box.querySelector(".picker-search").addEventListener("input", (e) => render(e.target.value));
+  box.querySelector(".picker-x").addEventListener("click", closePlaylistPicker);
+
+  back.appendChild(box);
+  document.body.appendChild(back);
+  pickerEl = back;
+  setTimeout(() => { const s = box.querySelector(".picker-search"); if (s) s.focus(); }, 0);
+  document.addEventListener("keydown", onPickerKey, true);
+}
+
+// transient toast (optimistic feedback; edits are fire-and-forget)
+let toastTimer = null;
+function toast(msg)
+{
+  let el = document.getElementById("toast");
+  if (!el)
+  {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.className = "toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+// small confirm dialog (reuses the picker/modal shell); onYes runs on "Delete"
+function openConfirm(title, body, confirmLabel, onYes)
+{
+  const back = document.createElement("div");
+  back.className = "picker-back";
+  back.addEventListener("pointerdown", (e) => { if (e.target === back) back.remove(); });
+  const box = document.createElement("div");
+  box.className = "picker npl-modal";
+  box.innerHTML = `<header><h3>${esc(title)}</h3>
+    <button class="picker-x" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <div class="npl-body">
+      <p style="margin:0;color:var(--text-dim)">${esc(body || "")}</p>
+      <div class="npl-actions">
+        <button class="npl-cancel">Cancel</button>
+        <button class="danger">${esc(confirmLabel || "Delete")}</button>
+      </div>
+    </div>`;
+  box.querySelector(".npl-cancel").addEventListener("click", () => back.remove());
+  box.querySelector(".picker-x").addEventListener("click", () => back.remove());
+  box.querySelector(".danger").addEventListener("click", () => { back.remove(); onYes(); });
+  back.appendChild(box);
+  document.body.appendChild(back);
+}
+
+// account / channel switcher (TuneDeck's own UI, fed by the ytm-accounts event)
+let accountsRequested = false;   // gate: open the picker on the next ytm-accounts, not on every emit
+function openAccountPicker(list)
+{
+  const back = document.createElement("div");
+  back.className = "picker-back";
+  back.addEventListener("pointerdown", (e) => { if (e.target === back) back.remove(); });
+  const box = document.createElement("div");
+  box.className = "picker";
+  box.innerHTML = `<header><h3>Switch account</h3>
+    <button class="picker-x" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <div class="picker-list"></div>`;
+  const listEl = box.querySelector(".picker-list");
+  if (!list || !list.length) listEl.innerHTML = `<p class="picker-empty">No channels found.</p>`;
+  else list.forEach((a) =>
+  {
+    const row = document.createElement("button");
+    row.className = "picker-row";
+    const bg = a.thumb
+      ? `background-image:url('${a.thumb}');background-size:cover;background-position:center;`
+      : `background:${cover(3)};`;
+    row.innerHTML = `<span class="picker-th" style="${bg};border-radius:50%"></span>
+      <span class="picker-n">${esc(a.name)}${a.handle ? `<small style="display:block;color:var(--text-dim)">${esc(a.handle)}</small>` : ""}</span>
+      ${a.selected ? `<span class="picker-check">&#10003;</span>` : ""}`;
+    row.addEventListener("click", () =>
+    {
+      const c = window.__TAURI__ && window.__TAURI__.core;
+      if (!a.selected && c) { c.invoke("switch_to", { key: a.handle || a.name }); toast("Switching account…"); }
+      back.remove();
+    });
+    listEl.appendChild(row);
+  });
+  box.querySelector(".picker-x").addEventListener("click", () => back.remove());
+  back.appendChild(box);
+  document.body.appendChild(back);
+}
+
+// "New playlist" modal: title + privacy, then create_playlist in the engine
+function openNewPlaylist()
+{
+  const back = document.createElement("div");
+  back.className = "picker-back";
+  back.addEventListener("pointerdown", (e) => { if (e.target === back) back.remove(); });
+
+  const box = document.createElement("div");
+  box.className = "picker npl-modal";
+  box.innerHTML = `<header><h3>New playlist</h3>
+    <button class="picker-x" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <div class="npl-body">
+      <input class="npl-title" placeholder="Playlist title" maxlength="150" />
+      <div class="npl-privacy">
+        <button data-priv="PRIVATE" class="on">Private</button>
+        <button data-priv="UNLISTED">Unlisted</button>
+        <button data-priv="PUBLIC">Public</button>
+      </div>
+      <div class="npl-actions">
+        <button class="npl-cancel">Cancel</button>
+        <button class="npl-create">Create</button>
+      </div>
+    </div>`;
+
+  let privacy = "PRIVATE";
+  box.querySelectorAll(".npl-privacy button").forEach((b) =>
+    b.addEventListener("click", () =>
+    {
+      privacy = b.dataset.priv;
+      box.querySelectorAll(".npl-privacy button").forEach((x) => x.classList.toggle("on", x === b));
+    }));
+
+  const titleInput = box.querySelector(".npl-title");
+  const submit = () =>
+  {
+    const t = titleInput.value.trim();
+    if (!t) { titleInput.focus(); return; }
+    createPlaylistCmd(t, privacy);
+    toast(`Creating "${t}"…`);   // fire-and-forget; ytm-playlist-created confirms + opens it
+    back.remove();
+  };
+  box.querySelector(".npl-create").addEventListener("click", submit);
+  box.querySelector(".npl-cancel").addEventListener("click", () => back.remove());
+  box.querySelector(".picker-x").addEventListener("click", () => back.remove());
+  titleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+
+  back.appendChild(box);
+  document.body.appendChild(back);
+  setTimeout(() => titleInput.focus(), 0);
+}
+
 function openItemMenu(anchor, item, opts)
 {
   closeItemMenu();
@@ -67,6 +259,7 @@ function openItemMenu(anchor, item, opts)
   const PN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h11M4 12h11M4 18h7M16 15l5 3-5 3z"/></svg>';
   const AQ = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h11M4 12h11M4 18h7M18 15v6M15 18h6"/></svg>';
   const AL = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.6"/></svg>';
+  const SP = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h13M3 10h13M3 14h8M13 15v6M10 18h6"/></svg>';
   const isSong = (item.kind || "v") === "v";
   const liked = !!item.liked;
   const actions = [];
@@ -81,6 +274,7 @@ function openItemMenu(anchor, item, opts)
       ? { label: "Remove from liked songs", ic: HF, run: () => { itemAction("unlike", item.id); item.liked = false; } }
       : { label: "Add to liked songs", ic: H, run: () => { itemAction("like", item.id); item.liked = true; } });
   if (isSong) actions.push({ label: "Start radio", ic: R, run: () => itemAction("radio", item.id) });
+  if (isSong) actions.push({ label: "Save to playlist", ic: SP, run: () => openPlaylistPicker(item.id) });
   if (item.album && item.album.id)
     actions.push({ label: "Go to album", ic: AL, run: () => openAlbum(item.album.id) });
   actions.push({ label: "Copy link", ic: L, run: () => copyLink(item) });
@@ -145,11 +339,25 @@ function queueAdd(videoId, action)
   if (core) core.invoke("queue_add", { videoId, action });
 }
 
-// Edits a playlist: action "add" (a=videoId) | "remove" (a=setVideoId, b=videoId) | "move" (a=movedSetVideoId, b=beforeSetVideoId).
+// Edits a playlist: action "add" (a=videoId) | "remove" (a=setVideoId, b=videoId) | "move" (a=setVideoId moved, b=setVideoId placed before).
 function playlistEdit(action, playlistId, a, b)
 {
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("playlist_edit", { action, playlistId, a: a || "", b: b || "" });
+}
+
+// Creates a new playlist in the engine. privacy: "PRIVATE" | "UNLISTED" | "PUBLIC".
+function createPlaylistCmd(title, privacy)
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (core) core.invoke("create_playlist", { title, privacy });
+}
+
+// Deletes a playlist in the engine (editable/owned only).
+function deletePlaylistCmd(id)
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (core) core.invoke("delete_playlist", { id });
 }
 
 
@@ -208,6 +416,7 @@ function wirePlayer()
     const open = document.getElementById("npView").classList.toggle("open");
     npExpand.classList.toggle("flip", open);   // chevron points down when the view is open
   });
+
 
   const seek = document.querySelector(".seek");
   let seekPending = 0, seekRaf = 0;
@@ -285,60 +494,98 @@ function setBg(el, url, tries)
   img.src = url;
 }
 
-// Search loads many thumbs at once; track them so a new search cancels the previous batch's
-// in-flight requests (otherwise connections pile up and later searches can't load thumbs).
-let searchImgs = [];
-function cancelSearchImgs()
-{
-  searchImgs.forEach((i) => { i.onload = i.onerror = null; i.src = ""; });
-  searchImgs = [];
-}
-function searchThumb(el, url, tries)
+// Lazy thumbnails: only load an element's image when it scrolls into view, and drop it (restoring the
+// gradient placeholder) when it leaves - so a long feed/search/list loads a handful of images instead
+// of dozens at once, and off-screen ones free memory. The placeholder gradient is captured from the
+// element's inline background set before lazyBg() is called.
+const _lazyObs = (typeof IntersectionObserver !== "undefined")
+  ? new IntersectionObserver((entries) =>
+    {
+      entries.forEach((en) => { if (en.isIntersecting) loadLazyBg(en.target); else releaseLazyBg(en.target); });
+    }, { rootMargin: "300px" })
+  : null;
+
+function lazyBg(el, url)
 {
   if (!el || !url) return;
+  el.dataset.lazyUrl = url;
+  if (el.dataset.ph === undefined) el.dataset.ph = el.style.backgroundImage || "";   // gradient placeholder
+  if (_lazyObs) _lazyObs.observe(el);
+  else setBg(el, url);   // no IntersectionObserver -> eager fallback
+}
+function loadLazyBg(el)
+{
+  const url = el.dataset.lazyUrl;
+  if (!url || el.dataset.loaded === url) return;
   const img = new Image();
-  searchImgs.push(img);
+  el._lazyImg = img;
   img.onload = () =>
   {
     img.onload = img.onerror = null;
-    if (el.isConnected) { el.style.backgroundImage = `url('${url}')`; el.style.backgroundSize = "cover"; el.style.backgroundPosition = "center"; }
+    if (!el.isConnected || el.dataset.lazyUrl !== url) return;
+    el.style.backgroundImage = `url('${url}')`;
+    el.style.backgroundSize = "cover";
+    el.style.backgroundPosition = "center";
+    el.dataset.loaded = url;
   };
-  img.onerror = () =>
-  {
-    img.onload = img.onerror = null;
-    if (el.isConnected && (tries || 0) < 2) setTimeout(() => searchThumb(el, url, (tries || 0) + 1), 1200 * ((tries || 0) + 1));
-  };
+  img.onerror = () => { img.onload = img.onerror = null; img.src = ""; };   // keep placeholder; retry on next enter
   img.src = url;
 }
+function releaseLazyBg(el)
+{
+  if (el._lazyImg) { el._lazyImg.onload = el._lazyImg.onerror = null; el._lazyImg.src = ""; el._lazyImg = null; }
+  if (el.dataset.loaded) { el.style.backgroundImage = el.dataset.ph || ""; delete el.dataset.loaded; }
+}
 
-// ---- config persistence (keyed by stable English section title) ----
+// Kept for callers: searches now use the lazy loader too (which also fixes the old connection pile-up).
+function cancelSearchImgs() {}
+function searchThumb(el, url) { lazyBg(el, url); }
+
+// config persistence (keyed by stable English section title, namespaced per account)
+// Each account keeps its own feed layout (hidden sections, card/list modes, order). The namespace
+// is a non-reversible hash of an opaque YTM account id - never a name or email - so TuneDeck stores
+// no account data, only "which layout goes with which login". Signed out, it falls back to the
+// un-suffixed keys (also what pre-namespacing installs already have).
+let acctKey = "";
+function hashAcct(s)
+{
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;   // djb2
+  return h.toString(36);
+}
+function cfgSuffix() { return acctKey ? "-" + acctKey : ""; }
 function loadCfg()
 {
+  const sx = cfgSuffix();
   try
   {
     return {
-      hidden: JSON.parse(localStorage.getItem("td-hidden") || "[]"),
-      modes: JSON.parse(localStorage.getItem("td-modes") || "{}"),
-      order: JSON.parse(localStorage.getItem("td-order") || "[]")
+      hidden: JSON.parse(localStorage.getItem("td-hidden" + sx) || "[]"),
+      modes: JSON.parse(localStorage.getItem("td-modes" + sx) || "{}"),
+      order: JSON.parse(localStorage.getItem("td-order" + sx) || "[]")
     };
   }
   catch (e) { return { hidden: [], modes: {}, order: [] }; }
 }
 function persist()
 {
+  const sx = cfgSuffix();
   try
   {
-    localStorage.setItem("td-hidden", JSON.stringify(sections.filter(s => s.off).map(s => s.key)));
-    // only non-default modes, so we don't over-persist untouched sections
-    localStorage.setItem("td-modes", JSON.stringify(Object.fromEntries(sections.filter(s => s.mode !== "row").map(s => [s.key, s.mode]))));
-    localStorage.setItem("td-order", JSON.stringify(sections.map(s => s.key)));
+    localStorage.setItem("td-hidden" + sx, JSON.stringify(sections.filter(s => s.off).map(s => s.key)));
+    // only non-default modes, so untouched sections are not persisted
+    localStorage.setItem("td-modes" + sx, JSON.stringify(Object.fromEntries(sections.filter(s => s.mode !== "row").map(s => [s.key, s.mode]))));
+    localStorage.setItem("td-order" + sx, JSON.stringify(sections.map(s => s.key)));
   }
   catch (e) {}
 }
 
-// ---- sidebar playlists (TEMP placeholder until we read the library) ----
+// sidebar playlists (populated from the ytm-playlists event)
 let playlists = [];   // library playlists, from the ytm-playlists event
 let lastPlaylistsSig = "";
+const deletedPlaylistIds = new Set();   // VL-stripped ids deleted this session (never re-show them)
+function stripVL(id) { return String(id || "").replace(/^VL/, ""); }
+function isDeletedPlaylist(x) { return deletedPlaylistIds.has(stripVL(x.id)) || deletedPlaylistIds.has(stripVL(x.openId)); }
 function renderPlaylists()
 {
   const wrap = document.getElementById("playlists");
@@ -357,7 +604,7 @@ function renderPlaylists()
   });
 }
 
-// ---- playlist view (router: home <-> playlist) ----
+// playlist view (router: home <-> playlist)
 const DOTS_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>';
 
 function showHome()
@@ -365,6 +612,7 @@ function showHome()
   cancelSearchImgs();   // leaving a view -> drop any pending search thumbnail loads
   document.getElementById("homeView").hidden = false;
   document.getElementById("playlistView").hidden = true;
+  document.querySelectorAll('.nav a[data-view]').forEach((a) => a.classList.toggle("active", a.dataset.view === "home"));
 }
 
 function openPlaylist(id)
@@ -374,8 +622,83 @@ function openPlaylist(id)
   const v = document.getElementById("playlistView");
   v.hidden = false;
   v.innerHTML = `<p style="color:var(--text-dim)">Loading playlist…</p>`;
+  if (DEMO) { renderPlaylistView(demoPlaylist()); return; }
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("open_playlist", { id: id });
+}
+
+// Library view (playlists / albums / subscriptions, + a Downloads tab)
+let libraryData = { sections: [] };
+function openLibrary()
+{
+  cancelSearchImgs();
+  closeNpView();
+  document.getElementById("homeView").hidden = true;
+  const v = document.getElementById("playlistView");
+  v.hidden = false;
+  v.innerHTML = `<p style="color:var(--text-dim)">Loading your library…</p>`;
+  if (DEMO) { renderLibraryView(demoLibrary()); return; }
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (core) core.invoke("open_library");
+}
+
+// Per-section cards/list layout, remembered across sessions (like the feed's toggle).
+let libModes = {};
+try { libModes = JSON.parse(localStorage.getItem("tunedeckLibModes") || "{}"); } catch (e) {}
+function saveLibModes() { try { localStorage.setItem("tunedeckLibModes", JSON.stringify(libModes)); } catch (e) {} }
+
+const LIB_TOGGLE = `<div class="layout-toggle">
+  <button data-m="row" title="Large cards"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg></button>
+  <button data-m="grid" title="Compact list"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="4" width="5" height="5" rx="1"/><rect x="10" y="5" width="11" height="3" rx="1.5"/><rect x="3" y="15" width="5" height="5" rx="1"/><rect x="10" y="16" width="11" height="3" rx="1.5"/></svg></button>
+</div>`;
+
+function libSection(sec, onClick)
+{
+  const s = document.createElement("section");
+  s.className = "section";
+  s.innerHTML = `<div class="section-head"><h3>${esc(sec.title)}</h3>${LIB_TOGGLE}</div><div class="items"></div>`;
+  const items = s.querySelector(".items");
+  let mode = libModes[sec.title] || "row";
+  renderItems(items, sec.items, mode, onClick);
+  s.querySelectorAll(".layout-toggle button").forEach((b) =>
+  {
+    if (b.dataset.m === mode) b.classList.add("on");
+    b.addEventListener("click", () =>
+    {
+      mode = b.dataset.m;
+      libModes[sec.title] = mode; saveLibModes();
+      s.querySelectorAll(".layout-toggle button").forEach((x) => x.classList.toggle("on", x.dataset.m === mode));
+      renderItems(items, sec.items, mode, onClick);
+    });
+  });
+  return s;
+}
+
+function renderLibraryView(lib)
+{
+  libraryData = lib || { sections: [] };
+  closeNpView();
+  document.getElementById("homeView").hidden = true;
+  const v = document.getElementById("playlistView");
+  v.hidden = false;
+  v.innerHTML = `
+    <div class="lib-head">
+      <h1>Library</h1>
+    </div>
+    <div id="libLibrary"></div>`;
+
+  const libWrap = v.querySelector("#libLibrary");
+  if (!libraryData.sections.length)
+  {
+    libWrap.innerHTML = `<p style="color:var(--text-dim)">Your library is empty.</p>`;
+  }
+  else libraryData.sections.forEach((sec) =>
+  {
+    const onClick = sec.route === "album" ? (it) => openAlbum(it.id)
+      : sec.route === "artist" ? (it) => openArtist(it.id)
+      : (it) => openPlaylist(it.id);
+    libWrap.appendChild(libSection(sec, onClick));
+  });
 }
 
 // Closes the full now-playing overlay so a page rendered in .main becomes visible.
@@ -394,6 +717,7 @@ function openAlbum(id)
   const v = document.getElementById("playlistView");
   v.hidden = false;
   v.innerHTML = `<p style="color:var(--text-dim)">Loading album…</p>`;
+  if (DEMO) { renderAlbumView(demoAlbum()); return; }
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("open_album", { id: id });
 }
@@ -424,6 +748,7 @@ function doSearch(query)
   const v = document.getElementById("playlistView");
   v.hidden = false;
   v.innerHTML = `<p style="color:var(--text-dim)">Searching…</p>`;
+  if (DEMO) { renderSearchView(demoSearch(query)); return; }
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("search", { query });
 }
@@ -536,6 +861,7 @@ function openArtist(id)
   const v = document.getElementById("playlistView");
   v.hidden = false;
   v.innerHTML = `<p style="color:var(--text-dim)">Loading artist…</p>`;
+  if (DEMO) { renderArtistView(demoArtist()); return; }
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("open_artist", { id: id });
 }
@@ -700,6 +1026,7 @@ function renderPlaylistView(pl)
         <div class="pl-actions">
           <button class="pl-play" id="plPlay"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Play</button>
           <button class="pl-shuffle" id="plShuffle"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>Shuffle</button>
+          ${pl.editable ? `<button class="pl-del" id="plDelete" title="Delete playlist"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6M10 11v6M14 11v6"/></svg>Delete</button>` : ""}
         </div>
       </div>
     </div>
@@ -712,12 +1039,25 @@ function renderPlaylistView(pl)
   v.querySelector("#plBack").addEventListener("click", showHome);
   v.querySelector("#plPlay").addEventListener("click", () => playFromUI({ id: pl.id, kind: "p" }));
   v.querySelector("#plShuffle").addEventListener("click", () => playFromUI({ id: pl.id, kind: "s" }));
+  const delBtn = v.querySelector("#plDelete");
+  if (delBtn) delBtn.addEventListener("click", () =>
+    openConfirm(`Delete "${pl.title}"?`, "This permanently removes the playlist from your library.", "Delete", () =>
+    {
+      deletePlaylistCmd(pl.id);
+      deletedPlaylistIds.add(stripVL(pl.id));                  // and keep it out of the sidebar for good
+      playlists = playlists.filter((x) => !isDeletedPlaylist(x));
+      lastPlaylistsSig = "";                                    // force the next emit through
+      renderPlaylists();
+      toast("Deleting playlist…");
+      showHome();
+    }));
   wireArtistLinks(v.querySelector(".pl-header"));
 }
 
-// ---- home sections (populated from the feed) ----
+// home sections (populated from the feed)
 let sections = [];
 let lastFeedSig = "";        // skip re-rendering home when the feed is unchanged (e.g. after a navigation)
+let authKnown = false;       // true once the first ytm-auth tick has reported signed-in vs signed-out
 
 function renderItems(container, items, mode, onClick)
 {
@@ -742,7 +1082,7 @@ function renderItems(container, items, mode, onClick)
         <div class="info"><div class="t">${esc(it.title)}</div><div class="s">${subHtml(it)}</div></div>
         <button class="grow-menu" title="More">${DOTS_SVG}</button>`;
     }
-    setBg(el.querySelector(".art, .thumb"), it.thumb);   // load the thumb with retry over the gradient
+    lazyBg(el.querySelector(".art, .thumb"), it.thumb);   // lazy: load only when scrolled into view
     const menuBtn = el.querySelector(".card-menu, .grow-menu");
     if (menuBtn) menuBtn.addEventListener("click", (e) => { e.stopPropagation(); openItemMenu(e.currentTarget, it); });
     wireArtistLinks(el);
@@ -766,7 +1106,19 @@ function renderSections()
   wrap.innerHTML = "";
   if (!sections.length)
   {
-    wrap.innerHTML = `<p style="color:var(--text-dim)">Loading your home…</p>`;
+    // Signed out there is no feed to load, so show a sign-in prompt instead of a permanent
+    // "Loading". authKnown gates it until the first auth tick, so the prompt never flashes before
+    // a signed-in session is known.
+    if (authKnown && !signedIn)
+    {
+      wrap.innerHTML = `<div class="home-empty">
+        <p>Log in to YouTube Music to load your home.</p>
+        <button class="pl-play" id="homeSignIn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>Log in</button>
+      </div>`;
+      const b = document.getElementById("homeSignIn");
+      if (b) b.addEventListener("click", () => { const c = window.__TAURI__ && window.__TAURI__.core; if (c) c.invoke("sign_in"); });
+    }
+    else wrap.innerHTML = `<p style="color:var(--text-dim)">Loading your home…</p>`;
     return;
   }
   sections.forEach(sec =>
@@ -976,7 +1328,7 @@ function renderCustomizeRows()
   filterCfg();
 }
 
-// ---- apply the live feed, keeping the user's saved config ----
+// apply the live feed, keeping the user's saved config
 function applyFeed(feed)
 {
   if (!Array.isArray(feed)) return;
@@ -1004,7 +1356,7 @@ function applyFeed(feed)
   renderCustomizeRows();
 }
 
-// ---- now playing (live) ----
+// now playing (live)
 function fmt(sec)
 {
   if (!sec || sec < 0) sec = 0;
@@ -1030,7 +1382,7 @@ function renderNpLike()
 function wireQueueRow(row, i)
 {
   let sx = 0, sy = 0, active = false, mode = null;   // mode: null | "swipe" | "cancel"
-  const SLOP = 6;   // px before we decide tap vs swipe
+  const SLOP = 6;   // px of movement before a gesture counts as a swipe rather than a tap
 
   row.addEventListener("pointerdown", (e) =>
   {
@@ -1173,16 +1525,31 @@ function updateNowPlaying(np)
   }
 }
 
-// ---- listen to the engine ----
+// Login state, driven by the reader's ytm-auth event. The avatar's click action and
+// tooltip follow it.
+let signedIn = false;
+let lastAcct = null;   // last seen account hash, to tell a switch from the first login
+function updateAvatar()
+{
+  const a = document.querySelector(".avatar");
+  if (a) a.title = "Account";
+  const btn = document.getElementById("acctAction");
+  if (btn) { btn.textContent = signedIn ? "Log out" : "Log in"; btn.classList.toggle("logout", signedIn); }
+  const sw = document.getElementById("acctSwitch");
+  if (sw) sw.hidden = !signedIn;   // switching only makes sense while signed in
+}
+
+// listen to the engine
 function listenToEngine()
 {
   const ev = window.__TAURI__ && window.__TAURI__.event;
   if (!ev) return;                          // running outside Tauri (plain browser preview)
-  ev.listen("ytm-state", (e) => updateNowPlaying(e.payload));
+  ev.listen("ytm-state", (e) => { updateNowPlaying(e.payload); dispatchJsTrack(e.payload); });
   ev.listen("ytm-feed", (e) => applyFeed(e.payload));
   ev.listen("ytm-playlists", (e) =>
   {
-    const p = e.payload || [];
+    let p = e.payload || [];
+    if (deletedPlaylistIds.size) p = p.filter((x) => !isDeletedPlaylist(x));   // never resurrect a deleted one
     const sig = p.map((x) => (x.id || "") + (x.title || "")).join("|");
     if (sig === lastPlaylistsSig) return;
     lastPlaylistsSig = sig;
@@ -1193,18 +1560,48 @@ function listenToEngine()
   ev.listen("ytm-album", (e) => renderAlbumView(e.payload));
   ev.listen("ytm-artist", (e) => renderArtistView(e.payload));
   ev.listen("ytm-search", (e) => renderSearchView(e.payload));
+  ev.listen("ytm-library", (e) => renderLibraryView(e.payload));
   ev.listen("ytm-status", (e) =>
   {
     const bar = document.getElementById("offlineBar");
     if (bar) bar.hidden = (e.payload || {}).online !== false;   // show only when offline
+    reinjectEngineScripts();   // re-apply plugin engine scripts after an engine reload (idempotent)
   });
-  ev.listen("ytm-queue", (e) => renderQueue(e.payload));
-  // now that we're listening, ask the reader to (re)send the feed
+  ev.listen("ytm-queue", (e) => { renderQueue(e.payload); dispatchJsQueue(e.payload); });
+  ev.listen("ytm-auth", (e) =>
+  {
+    const p = e.payload || {};
+    signedIn = !!p.signedIn;
+    authKnown = true;
+    const h = signedIn && p.acct ? hashAcct(String(p.acct)) : "";
+    const changed = h !== acctKey;
+    acctKey = h;                 // feed config is namespaced per account from here on
+    updateAvatar();
+    if (!sections.length) renderSections();   // swap the "Loading" placeholder for the login nudge, or back
+    // A re-emit while already signed in means the active account changed: reload the feed for the
+    // new account. lastAcct is null on the first tick, so the initial sign-in does not trigger it.
+    if (changed && signedIn && lastAcct !== null && !DEMO)
+    {
+      lastFeedSig = "";           // force a re-render even if the engine is mid-reload
+      const core = window.__TAURI__ && window.__TAURI__.core;
+      if (core) core.invoke("reload_feed");
+    }
+    lastAcct = h;
+  });
+  ev.listen("ytm-accounts", (e) => { if (accountsRequested) { accountsRequested = false; openAccountPicker(e.payload || []); } });
+  ev.listen("ytm-playlist-created", (e) =>
+  {
+    const o = e.payload || {};
+    toast("Playlist created");
+    if (o.id) openPlaylist(o.id);   // jump to the new (empty) playlist as confirmation
+  });
+  ev.listen("ytm-playlist-deleted", () => toast("Playlist deleted"));
+  // request the feed now that the listeners are attached
   ev.emit("ui-ready");
   setTimeout(() => ev.emit("ui-ready"), 1500);   // retry once in case the reader wasn't listening yet
 }
 
-// ---- theme + accent ----
+// theme + accent
 function setAccent(color)
 {
   document.documentElement.style.setProperty("--accent", color);
@@ -1229,19 +1626,28 @@ function wireControls()
   document.getElementById("cfgSearch").addEventListener("input", filterCfg);
   document.getElementById("cfgApply").addEventListener("click", renderCustomizeRows);
 
+  const navLinks = document.querySelectorAll('.nav a[data-view]');
+  const setNavActive = (view) => navLinks.forEach((a) => a.classList.toggle("active", a.dataset.view === view));
   const homeNav = document.querySelector('.nav a[data-view="home"]');
-  if (homeNav) homeNav.addEventListener("click", (e) => { e.preventDefault(); showHome(); });
+  if (homeNav) homeNav.addEventListener("click", (e) => { e.preventDefault(); setNavActive("home"); showHome(); });
+  const libNav = document.querySelector('.nav a[data-view="library"]');
+  if (libNav) libNav.addEventListener("click", (e) => { e.preventDefault(); setNavActive("library"); openLibrary(); });
 
   const reloadBtn = document.getElementById("reloadBtn");
   let reloadStop = 0;
   reloadBtn.addEventListener("click", () =>
   {
+    const plv = document.getElementById("playlistView");
+    if (plv && !plv.hidden && plv.querySelector(".lib-head")) { openLibrary(); return; }   // library view: reload it instead
     reloadBtn.classList.add("spin");                                  // spins until the feed returns
     clearTimeout(reloadStop);
     reloadStop = setTimeout(() => reloadBtn.classList.remove("spin"), 12000);   // safety stop
+    if (DEMO) { applyFeed(demoFeed()); return; }
     const core = window.__TAURI__ && window.__TAURI__.core;
     if (core) core.invoke("reload_feed");
   });
+
+  document.querySelector(".newpl")?.addEventListener("click", openNewPlaylist);
 
   const searchInput = document.querySelector(".search input");
   let searchTimer = 0;
@@ -1258,7 +1664,7 @@ function wireControls()
   });
 
   const modal = document.getElementById("settingsModal");
-  document.getElementById("settingsBtn").addEventListener("click", () => modal.classList.add("show"));
+  document.getElementById("settingsBtn").addEventListener("click", () => { modal.classList.add("show"); loadSerialPorts(); renderSerialFeedPick(); renderPluginsTab(); });
   document.getElementById("settingsClose").addEventListener("click", () => modal.classList.remove("show"));
   modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.remove("show"); });
 
@@ -1283,16 +1689,345 @@ function wireControls()
       applyTheme(t);
     }));
 
-  const ao = document.getElementById("audioOnly");
-  try { ao.checked = localStorage.getItem("td-audioonly") === "1"; } catch (e) {}
-  ao.addEventListener("change", () =>
+  // Account menu: hovering or clicking the avatar reveals one action - Log in when signed
+  // out, Log out when signed in. No account controls in Settings.
+  const core0 = () => window.__TAURI__ && window.__TAURI__.core;
+  const doSignOut = () =>
+    openConfirm("Log out?", "This signs you out of YouTube Music. TuneDeck keeps nothing about your account.", "Log out", () =>
+    {
+      const c = core0(); if (c) c.invoke("sign_out"); toast("Logging out…");
+    });
+  const doSignIn = () => { const c = core0(); if (c) c.invoke("sign_in"); };
+  const acct = document.getElementById("account");
+  document.querySelector(".avatar")?.addEventListener("click", (e) => { e.stopPropagation(); acct?.classList.toggle("open"); });
+  document.getElementById("acctAction")?.addEventListener("click", () => { acct?.classList.remove("open"); if (signedIn) doSignOut(); else doSignIn(); });
+  document.getElementById("acctSwitch")?.addEventListener("click", () => { acct?.classList.remove("open"); accountsRequested = true; const c = core0(); if (c) c.invoke("load_accounts"); });
+  document.addEventListener("click", () => acct?.classList.remove("open"));
+  updateAvatar();
+
+  const portSel = document.getElementById("serialPort");
+  if (portSel)
   {
-    try { localStorage.setItem("td-audioonly", ao.checked ? "1" : "0"); } catch (e) {}
-    const core = window.__TAURI__ && window.__TAURI__.core;
-    if (core) core.invoke("set_audio_only", { on: ao.checked });
-  });
+    portSel.addEventListener("change", () =>
+    {
+      const v = portSel.value;
+      try { localStorage.setItem("td-serialport", v); } catch (e) {}
+      const core = window.__TAURI__ && window.__TAURI__.core;
+      if (core) core.invoke("set_serial_port", { name: v || null });
+    });
+    // initial fill, then push the remembered port to Rust so it applies on startup
+    loadSerialPorts().then(() =>
+    {
+      const core = window.__TAURI__ && window.__TAURI__.core;
+      if (core && portSel.value) core.invoke("set_serial_port", { name: portSel.value });
+    });
+  }
+
+  const subSel = document.getElementById("serialSub");
+  const volSel = document.getElementById("serialVol");
+  const volLow = document.getElementById("serialVolLow");
+  if (subSel && volSel && volLow)
+  {
+    try { subSel.value = localStorage.getItem("td-serialsub") || "short"; } catch (e) {}
+    try { volSel.value = localStorage.getItem("td-serialvol") || "snap"; } catch (e) {}
+    try { volLow.checked = (localStorage.getItem("td-serialvollow") || "1") === "1"; } catch (e) {}
+    subSel.addEventListener("change", () => { try { localStorage.setItem("td-serialsub", subSel.value); } catch (e) {} pushSerialOpts(); });
+    volSel.addEventListener("change", () => { try { localStorage.setItem("td-serialvol", volSel.value); } catch (e) {} pushSerialOpts(); });
+    volLow.addEventListener("change", () => { try { localStorage.setItem("td-serialvollow", volLow.checked ? "1" : "0"); } catch (e) {} pushSerialOpts(); });
+    pushSerialOpts();                 // apply on startup
+    setTimeout(pushSerialOpts, 2500); // re-apply once the engine window is ready (vol mode)
+  }
+
+  // settings tabs (General / Device / Plugins)
+  const setPanes = { general: "setGeneral", device: "setDevice", plugins: "setPlugins" };
+  document.querySelectorAll(".set-tabs button").forEach((b) =>
+    b.addEventListener("click", () =>
+    {
+      document.querySelectorAll(".set-tabs button").forEach((x) => x.classList.toggle("on", x === b));
+      Object.entries(setPanes).forEach(([k, elid]) => { const el = document.getElementById(elid); if (el) el.hidden = b.dataset.set !== k; });
+      if (b.dataset.set === "device") renderSerialFeedPick();
+      if (b.dataset.set === "plugins") renderPluginsTab();
+    }));
+
+  applySavedPlugins();   // push saved native-plugin enabled/config to the backend on startup
+  loadJsPlugins();        // run enabled drop-in JS plugins
 
   makeSortable(document.getElementById("cfgActive"), ".cfg-grip", commitCustomizeOrder);
+}
+
+// Fills the serial-port picker from the OS, keeping the remembered selection (even if unplugged).
+async function loadSerialPorts()
+{
+  const portSel = document.getElementById("serialPort");
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!portSel || !core) return;
+  let saved = "";
+  try { saved = localStorage.getItem("td-serialport") || ""; } catch (e) {}
+  let ports = [];
+  try { ports = await core.invoke("list_serial_ports"); } catch (e) {}
+  let html = `<option value="">Auto-detect</option>` +
+    ports.map((p) => `<option value="${esc(p.name)}">${esc(p.label)}</option>`).join("");
+  if (saved && !ports.some((p) => p.name === saved))
+    html += `<option value="${esc(saved)}">${esc(saved)} (not connected)</option>`;
+  portSel.innerHTML = html;
+  portSel.value = saved;
+}
+
+// plugins (declarative: UI auto-rendered from each plugin's manifest/config schema)
+// Native plugins live in Rust (plugins_manifest). JS plugins are drop-in folders run here in the UI
+// webview with a `tunedeck` API (Phase 2). Both share the same manifest/config model and settings UI.
+
+const jsPluginHandlers = { track: [], queue: [] };   // {id, cb}
+const jsLoadedIds = new Set();                         // JS plugin ids already executed
+const jsConfigCbs = {};                                // id -> [cb]
+const engineInjections = [];                           // {id, js} re-applied on engine reload
+
+// Re-applies plugins' engine scripts after an engine reload (eval does not survive navigation).
+// Scripts must be idempotent (guard with a window flag); re-applying is cheap + safe.
+function reinjectEngineScripts()
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core || !engineInjections.length) return;
+  engineInjections.forEach((e) => { if (isPluginEnabled(e.id)) core.invoke("plugin_inject_engine", { js: e.js }); });
+}
+
+function isPluginEnabled(id) { try { return localStorage.getItem(`td-plugin-${id}-enabled`) === "1"; } catch (e) { return false; } }
+function pluginCfgValue(id, f)
+{
+  try { const s = localStorage.getItem(`td-plugin-${id}-${f.key}`); if (s !== null) return s; } catch (e) {}
+  return f.default;
+}
+
+// The `tunedeck` API handed to each JS plugin.
+function jsPluginApi(id, manifest)
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  jsConfigCbs[id] = jsConfigCbs[id] || [];
+  const fieldDefault = (key) => { const f = (manifest.fields || []).find((x) => x.key === key); return f ? f.default : undefined; };
+  return {
+    id,
+    onTrack: (cb) => jsPluginHandlers.track.push({ id, cb }),
+    onQueue: (cb) => jsPluginHandlers.queue.push({ id, cb }),
+    injectEngine: (js) => { const s = String(js); engineInjections.push({ id, js: s }); if (core) core.invoke("plugin_inject_engine", { js: s }); },
+    http: (url, opts) => { opts = opts || {}; return core ? core.invoke("plugin_http", { url, method: opts.method || "GET", body: opts.body || null }) : Promise.resolve(null); },
+    config:
+    {
+      get: (key) => { try { const s = localStorage.getItem(`td-plugin-${id}-${key}`); if (s !== null) return s; } catch (e) {} return fieldDefault(key); },
+      set: (key, val) => { try { localStorage.setItem(`td-plugin-${id}-${key}`, String(val)); } catch (e) {} notifyJsConfig(id, key, String(val)); },
+    },
+    onConfig: (cb) => jsConfigCbs[id].push(cb),
+    log: (...a) => console.log(`[plugin:${id}]`, ...a),
+  };
+}
+function notifyJsConfig(id, key, val) { (jsConfigCbs[id] || []).forEach((cb) => { try { cb(key, val); } catch (e) {} }); }
+
+// Executes one JS plugin's source with its `tunedeck` API (once).
+function runJsPlugin(entry)
+{
+  if (jsLoadedIds.has(entry.id)) return;
+  jsLoadedIds.add(entry.id);
+  try { new Function("tunedeck", entry.source)(jsPluginApi(entry.id, entry.manifest || {})); }
+  catch (e) { console.warn(`[plugin:${entry.id}] failed to load`, e); }
+}
+
+async function loadJsPluginById(id)
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core || jsLoadedIds.has(id)) return;
+  let list = [];
+  try { list = await core.invoke("js_plugins_list"); } catch (e) {}
+  const entry = list.find((p) => p.id === id);
+  if (entry) runJsPlugin(entry);
+}
+
+// Startup: run every enabled JS plugin.
+async function loadJsPlugins()
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core) return;
+  let list = [];
+  try { list = await core.invoke("js_plugins_list"); } catch (e) {}
+  list.forEach((entry) => { if (isPluginEnabled(entry.id)) runJsPlugin(entry); });
+}
+
+// Fan playback events out to enabled JS plugins (called from the ytm-state / ytm-queue listeners).
+function dispatchJsTrack(p)
+{
+  if (!jsPluginHandlers.track.length) return;
+  p = p || {};
+  const t = { title: p.title || "", artist: p.author || "", album: p.album || "", cover: p.cover || "", id: p.id || "", dur: p.dur || 0, pos: p.cur || 0, playing: !!p.playing };
+  jsPluginHandlers.track.forEach((h) => { if (isPluginEnabled(h.id)) { try { h.cb(t); } catch (e) {} } });
+}
+function dispatchJsQueue(q)
+{
+  if (!jsPluginHandlers.queue.length) return;
+  jsPluginHandlers.queue.forEach((h) => { if (isPluginEnabled(h.id)) { try { h.cb(q || []); } catch (e) {} } });
+}
+
+// Pushes saved NATIVE plugin enabled/config to the backend on startup (localStorage = persistence).
+async function applySavedPlugins()
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core) return;
+  let list = [];
+  try { list = await core.invoke("plugins_manifest"); } catch (e) {}
+  list.forEach((pl) =>
+  {
+    (pl.fields || []).forEach((f) =>
+    {
+      try { const s = localStorage.getItem(`td-plugin-${pl.id}-${f.key}`); if (s !== null) core.invoke("plugin_set_config", { id: pl.id, key: f.key, value: s }); } catch (e) {}
+    });
+    try { const s = localStorage.getItem(`td-plugin-${pl.id}-enabled`); const on = s !== null ? s === "1" : !!pl.enabled; core.invoke("plugin_set_enabled", { id: pl.id, on }); } catch (e) {}
+  });
+}
+
+// One config control from a manifest field; persists + routes the change (native -> Rust, js -> plugin).
+function pluginFieldRow(entry, f)
+{
+  const key = `td-plugin-${entry.id}-${f.key}`;
+  let val = pluginCfgValue(entry.id, f);
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  const push = (v) =>
+  {
+    try { localStorage.setItem(key, v); } catch (e) {}
+    if (entry.kind === "native") { if (core) core.invoke("plugin_set_config", { id: entry.id, key: f.key, value: v }); }
+    else notifyJsConfig(entry.id, f.key, v);
+  };
+  const row = document.createElement("div");
+  row.className = "opt-row";
+  const label = `<span>${esc(f.label)}${f.hint ? ` <span class="opt-hint">${esc(f.hint)}</span>` : ""}</span>`;
+  if (f.kind === "bool")
+  {
+    const on = val === "1" || val === "true";
+    const uid = `plf_${entry.id}_${f.key}`;
+    row.innerHTML = `${label}<span class="switch"><input type="checkbox" id="${uid}" ${on ? "checked" : ""}><label for="${uid}"></label></span>`;
+    row.querySelector("input").addEventListener("change", (e) => push(e.target.checked ? "1" : "0"));
+  }
+  else if (f.kind === "select")
+  {
+    const opts = (f.options || []).map((o) => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("");
+    row.innerHTML = `${label}<select class="port-select">${opts}</select>`;
+    row.querySelector("select").addEventListener("change", (e) => push(e.target.value));
+  }
+  else
+  {
+    row.innerHTML = `${label}<input class="port-select" type="text">`;
+    const inp = row.querySelector("input");
+    inp.value = val || "";
+    inp.addEventListener("change", () => push(inp.value.trim()));
+  }
+  return row;
+}
+
+function pluginCard(entry)
+{
+  const enKey = `td-plugin-${entry.id}-enabled`;
+  let enabled = !!entry.enabled;
+  try { const s = localStorage.getItem(enKey); if (s !== null) enabled = s === "1"; } catch (e) {}
+
+  const field = document.createElement("div");
+  field.className = "field";
+  const tag = entry.kind === "js" ? ` <span class="opt-hint">plugin</span>` : "";
+  field.innerHTML = `<label class="k">${esc(entry.label)}${tag}</label>`;
+
+  const head = document.createElement("div");
+  head.className = "opt-row";
+  const uid = `pl_${entry.id}`;
+  head.innerHTML = `<span>${esc(entry.description || "Enable")}</span>
+    <span class="switch"><input type="checkbox" id="${uid}" ${enabled ? "checked" : ""}><label for="${uid}"></label></span>`;
+  head.querySelector("input").addEventListener("change", (e) =>
+  {
+    try { localStorage.setItem(enKey, e.target.checked ? "1" : "0"); } catch (err) {}
+    const core = window.__TAURI__ && window.__TAURI__.core;
+    if (entry.kind === "native") { if (core) core.invoke("plugin_set_enabled", { id: entry.id, on: e.target.checked }); }
+    else if (e.target.checked) loadJsPluginById(entry.id);   // js: run on enable; disable just stops its callbacks
+  });
+  field.appendChild(head);
+
+  (entry.fields || []).filter((f) => !f.advanced).forEach((f) => field.appendChild(pluginFieldRow(entry, f)));
+  const adv = (entry.fields || []).filter((f) => f.advanced);
+  if (adv.length)
+  {
+    const advWrap = document.createElement("div");
+    advWrap.hidden = true;
+    adv.forEach((f) => advWrap.appendChild(pluginFieldRow(entry, f)));
+    const advBtn = document.createElement("button");
+    advBtn.className = "adv-toggle";
+    advBtn.textContent = "Advanced";
+    advBtn.addEventListener("click", () => { advWrap.hidden = !advWrap.hidden; });
+    field.appendChild(advBtn);
+    field.appendChild(advWrap);
+  }
+  return field;
+}
+
+// Auto-renders the Plugins tab: native plugins + drop-in JS plugins, uniformly.
+async function renderPluginsTab()
+{
+  const wrap = document.getElementById("pluginsList");
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!wrap || !core) return;
+  let native = [], js = [], dir = "";
+  try { native = await core.invoke("plugins_manifest"); } catch (e) {}
+  try { js = await core.invoke("js_plugins_list"); } catch (e) {}
+  try { dir = await core.invoke("js_plugins_dir"); } catch (e) {}
+
+  const entries = [];
+  native.forEach((p) => entries.push({ kind: "native", id: p.id, label: p.label, description: p.description, fields: p.fields || [], enabled: p.enabled }));
+  js.forEach((p) => { const m = p.manifest || {}; entries.push({ kind: "js", id: p.id, label: m.label || p.id, description: m.description || "", fields: (m.fields || []).map((f) => ({ ...f, value: f.default })), enabled: false }); });
+
+  wrap.innerHTML = "";
+  entries.forEach((e) => wrap.appendChild(pluginCard(e)));
+
+  const note = document.createElement("p");
+  note.className = "plugins-note";
+  note.textContent = dir ? `Drop-in JS plugins folder: ${dir}` : "";
+  wrap.appendChild(note);
+}
+
+// Pushes all serial-interaction options to Rust/engine (reads from localStorage so it is DOM-free).
+function pushSerialOpts()
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core) return;
+  let sub = "short", vol = "snap", low = true, feed = [];
+  try { sub = localStorage.getItem("td-serialsub") || "short"; } catch (e) {}
+  try { vol = localStorage.getItem("td-serialvol") || "snap"; } catch (e) {}
+  try { low = (localStorage.getItem("td-serialvollow") || "1") === "1"; } catch (e) {}
+  try { const f = localStorage.getItem("td-serialfeed"); feed = f ? JSON.parse(f) : []; } catch (e) {}
+  core.invoke("set_serial_opts", {
+    subtitleFull: sub === "full",
+    volMode: vol,
+    volLowFine: low,
+    feedSections: Array.isArray(feed) ? feed : [],
+  });
+}
+
+// Renders the "which feed sections reach the device" checkboxes from the current home feed.
+// No saved set = all sections allowed (empty filter on the Rust side).
+function renderSerialFeedPick()
+{
+  const wrap = document.getElementById("serialFeedSections");
+  if (!wrap) return;
+  let saved = null;
+  try { const s = localStorage.getItem("td-serialfeed"); saved = s ? JSON.parse(s) : null; } catch (e) {}
+  const labels = (typeof sections !== "undefined" && sections) ? sections.map((s) => s.label).filter(Boolean) : [];
+  if (!labels.length) { wrap.innerHTML = `<p class="fp-empty">Feed not loaded yet - open Home first.</p>`; return; }
+  wrap.innerHTML = "";
+  labels.forEach((label) =>
+  {
+    const checked = !Array.isArray(saved) || saved.includes(label);
+    const row = document.createElement("label");
+    row.innerHTML = `<input type="checkbox" ${checked ? "checked" : ""}><span>${esc(label)}</span>`;
+    row.querySelector("input").addEventListener("change", () =>
+    {
+      const inputs = [...wrap.querySelectorAll("input")];
+      const picked = labels.filter((_, i) => inputs[i] && inputs[i].checked);
+      try { localStorage.setItem("td-serialfeed", JSON.stringify(picked)); } catch (e) {}
+      pushSerialOpts();
+    });
+    wrap.appendChild(row);
+  });
 }
 
 function restorePrefs()
@@ -1310,6 +2045,106 @@ function restorePrefs()
   catch (e) { applyTheme("system"); }
 }
 
+// demo mode
+// A build made with `--features demo` has no hidden engine: the backend command is_demo
+// returns true and the whole UI runs on labelled placeholder data, so the interface can be
+// clicked through (and screenshotted) with no login or network. Field values are their own
+// labels on purpose ("Song Title", "Artist Name", ...).
+function demoSongs(n)
+{
+  return Array.from({ length: n }, () => ({ id: "demo", title: "Song Title", sub: "Artist Name", kind: "v" }));
+}
+function demoTracks(n)
+{
+  return Array.from({ length: n }, () => ({ id: "demo", title: "Song Title", sub: "Artist Name", dur: "3:00", kind: "v" }));
+}
+function demoFeed()
+{
+  return [
+    { key: "demo-1", title: "Section Title", items: demoSongs(8) },
+    { key: "demo-2", title: "Section Title", items: demoSongs(8) },
+    { key: "demo-3", title: "Section Title", items: demoSongs(8) }
+  ];
+}
+function demoState()
+{
+  return { title: "Song Title", artists: [{ id: "demo", name: "Artist Name" }], album: "Album Name", albumId: "demo", year: "Year", cur: 72, dur: 210, playing: true, vol: 60, cover: null, liked: false };
+}
+function demoQueue()
+{
+  const q = Array.from({ length: 6 }, (_, i) => ({ title: "Song Title", sub: "Artist Name", id: "demo", cur: i === 0 }));
+  q.push({ title: "Song Title", sub: "Artist Name", id: "demo", auto: true });
+  q.push({ title: "Song Title", sub: "Artist Name", id: "demo", auto: true });
+  return q;
+}
+function demoPlaylistsList()
+{
+  return Array.from({ length: 6 }, () => ({ id: "demo", openId: "demo", title: "Playlist Title", sub: "Playlist Author" }));
+}
+function demoPlaylist()
+{
+  return { title: "Playlist Title", author: "Playlist Author", authorId: "demo", meta: "Playlist", cover: null, id: "demo", editable: false, reorder: false, tracks: demoTracks(10) };
+}
+function demoAlbum()
+{
+  return { title: "Album Name", artist: "Album Artist", year: "Year", cover: null, playId: "demo", tracks: demoTracks(10) };
+}
+function demoArtist()
+{
+  return {
+    name: "Artist Name", listeners: "Monthly Listeners", cover: null,
+    topSongs: demoTracks(5),
+    shelves: [
+      { title: "Shelf Title", items: Array.from({ length: 6 }, () => ({ id: "MPREdemo", title: "Album Name", sub: "Year", kind: "b" })) },
+      { title: "Shelf Title", items: demoSongs(6) }
+    ]
+  };
+}
+function demoSearch(query)
+{
+  return {
+    query: query || "Search Query",
+    top: { id: "demo", title: "Top Result", sub: "Artist Name", kind: "v", playId: "demo", playKind: "p" },
+    results: [
+      { id: "demo", title: "Song Title", sub: "Artist Name", kind: "v" },
+      { id: "demo", title: "Song Title", sub: "Artist Name", kind: "v" },
+      { id: "MPREdemo", title: "Album Name", sub: "Album Artist", kind: "b" },
+      { id: "UCdemo", title: "Artist Name", sub: "Artist", kind: "b" },
+      { id: "VLdemo", title: "Playlist Title", sub: "Playlist Author", kind: "p" }
+    ]
+  };
+}
+function demoLibrary()
+{
+  return { sections: [
+    { title: "Playlists", items: Array.from({ length: 6 }, () => ({ id: "demo", title: "Playlist Title", sub: "Playlist Author" })) },
+    { title: "Albums", route: "album", items: Array.from({ length: 6 }, () => ({ id: "demo", title: "Album Name", sub: "Album Artist" })) },
+    { title: "Subscriptions", route: "artist", items: Array.from({ length: 6 }, () => ({ id: "demo", title: "Artist Name", sub: "Artist" })) }
+  ] };
+}
+
+// Set true by maybeStartDemo in a demo build. The navigation functions check it and render
+// placeholder data instead of calling the (absent) backend. Swapping window.__TAURI__.core.invoke
+// itself is not an option: it is read-only, and main.js is a module, so the assignment throws.
+let DEMO = false;
+
+async function maybeStartDemo()
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core) return;
+  let demo = false;
+  try { demo = await core.invoke("is_demo"); } catch (e) {}
+  console.info("[TuneDeck] demo mode:", demo);   // false here = not a demo build (run `npm run dev:demo`)
+  if (!demo) return;
+  DEMO = true;                // nav functions now render placeholders instead of hitting the backend
+  document.title = "TuneDeck (demo)";
+  playlists = demoPlaylistsList();
+  renderPlaylists();
+  applyFeed(demoFeed());
+  updateNowPlaying(demoState());
+  renderQueue(demoQueue());
+}
+
 window.addEventListener("DOMContentLoaded", () =>
 {
   renderPlaylists();
@@ -1319,4 +2154,5 @@ window.addEventListener("DOMContentLoaded", () =>
   wirePlayer();
   restorePrefs();
   listenToEngine();
+  maybeStartDemo();          // no-op unless this is a demo build (is_demo)
 });
