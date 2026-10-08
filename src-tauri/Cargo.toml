@@ -1,6 +1,6 @@
 [package]
 name = "tunedeck"
-version = "0.1.0"
+version = "0.1.1"
 description = "A desktop YouTube Music client and companion to the TuneFrame display."
 authors = ["lunek"]
 edition = "2021"
