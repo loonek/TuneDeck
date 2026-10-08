@@ -37,4 +37,4 @@ jobs:
           releaseName: "TuneDeck ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true   # generates + uploads latest.json for the updater endpoint
+          includeUpdaterJson: true

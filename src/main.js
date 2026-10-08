@@ -398,9 +398,11 @@ function wirePlayer()
   document.querySelector(".np .like").addEventListener("click", () =>
   {
     if (!currentNp || !currentNp.id) return;
-    itemAction("like-current", currentNp.id);   // clicks the engine's own Like button (toggles + keeps it in sync)
-    currentNp.liked = !currentNp.liked;          // optimistic; the next state tick confirms from the engine
-    renderNpLike();
+    const want = !currentNp.liked;
+    itemAction(want ? "like" : "unlike", currentNp.id);   // reliable InnerTube like/removelike (same path as the menu)
+    currentNp.liked = want;
+    likeState[currentNp.id] = want;   // the API toggle does not change YTM's player-bar like-status, so remember
+    renderNpLike();                    // it locally - otherwise the next snapshot would revert the heart
   });
 
   document.querySelector(".np-menu").addEventListener("click", (e) =>
@@ -1056,6 +1058,7 @@ function renderPlaylistView(pl)
 
 // home sections (populated from the feed)
 let sections = [];
+let lastFeed = null;         // the last feed array, so it can be re-applied when the account namespace changes
 let lastFeedSig = "";        // skip re-rendering home when the feed is unchanged (e.g. after a navigation)
 let authKnown = false;       // true once the first ytm-auth tick has reported signed-in vs signed-out
 
@@ -1332,6 +1335,7 @@ function renderCustomizeRows()
 function applyFeed(feed)
 {
   if (!Array.isArray(feed)) return;
+  lastFeed = feed;   // keep it so an account change can re-key the layout without a round-trip to the engine
   document.getElementById("reloadBtn")?.classList.remove("spin");   // feed arrived -> stop the reload spinner
   const sig = feed.map((s) => (s.key || s.title) + ":" + (s.items || []).map((i) => i.id).join(",")).join("|");
   if (sig === lastFeedSig) return;   // identical feed -> don't rebuild the DOM (keeps scroll position)
@@ -1366,6 +1370,10 @@ function fmt(sec)
 }
 
 let currentNp = null;
+// videoId -> liked, set when the heart is toggled. The like/unlike API does not update YTM's own
+// player-bar like-status, so the snapshot keeps reporting the old value; this override keeps the
+// heart on the user's choice until the track changes.
+const likeState = Object.create(null);
 const NP_HEART = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>';
 const NP_HEART_FILLED = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>';
 
@@ -1484,6 +1492,7 @@ function updateNowPlaying(np)
 {
   if (!np) return;
   currentNp = np;
+  if (np.id && np.id in likeState) currentNp.liked = likeState[np.id];   // keep a just-toggled heart from reverting
   document.getElementById("npTitle").textContent = np.title || "Nothing playing";
   renderNpArtists(document.getElementById("npArtist"), np);
   const cur = np.cur || 0, dur = np.dur || 0;
@@ -1578,13 +1587,21 @@ function listenToEngine()
     acctKey = h;                 // feed config is namespaced per account from here on
     updateAvatar();
     if (!sections.length) renderSections();   // swap the "Loading" placeholder for the login nudge, or back
-    // A re-emit while already signed in means the active account changed: reload the feed for the
-    // new account. lastAcct is null on the first tick, so the initial sign-in does not trigger it.
     if (changed && signedIn && lastAcct !== null && !DEMO)
     {
-      lastFeedSig = "";           // force a re-render even if the engine is mid-reload
+      // Account switch: pull the new account's feed (content differs, not just the layout).
+      lastFeedSig = "";
       const core = window.__TAURI__ && window.__TAURI__.core;
       if (core) core.invoke("reload_feed");
+    }
+    else if (changed && lastFeed && !DEMO)
+    {
+      // The config namespace just became known (first auth tick) or changed: re-apply the current
+      // feed so hidden/order come from this account's saved layout, not the namespace read before
+      // auth landed. Without this a feed that arrived before ytm-auth keeps the wrong layout, and
+      // hidden sections reappear.
+      lastFeedSig = "";
+      applyFeed(lastFeed);
     }
     lastAcct = h;
   });

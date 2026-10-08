@@ -29,3 +29,6 @@ Rough backlog, not promises. Ordered loosely by what's next.
 - Local music download + caching the rest of the data - would mean storing user data,
   so only with care, and not in a way that's blatant against YouTube's terms. Needs
   thought before it goes anywhere near shipping.
+
+
+Like button on miniplayer
