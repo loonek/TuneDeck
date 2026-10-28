@@ -4,6 +4,26 @@
   // runs first and suppresses its "unsaved changes" prompt on navigations.
   window.addEventListener("beforeunload", (e) => e.stopImmediatePropagation(), true);
 
+  // Optional diagnostics (off by default): set localStorage.tunedeckDiag = "1" in the engine window
+  // to log play requests and the post-load playback state, which surfaces autoplay being blocked.
+  function tdDiag()
+  {
+    try { if (localStorage.getItem("tunedeckDiag")) console.log.apply(console, ["[tunedeck]"].concat([].slice.call(arguments))); } catch (e) {}
+  }
+  try
+  {
+    if (localStorage.getItem("tunedeckDiag"))
+    {
+      setTimeout(() =>
+      {
+        const v = document.querySelector("video");
+        tdDiag("post-load", location.pathname + location.search,
+          v ? { paused: v.paused, cur: Math.round(v.currentTime), dur: Math.round(v.duration || 0) } : "no video element");
+      }, 3000);
+    }
+  }
+  catch (e) {}
+
   // When the page was opened with shuffle intent, turn shuffle on once the player is ready,
   // then skip one (the list autoplays in order first).
   try
@@ -513,21 +533,44 @@
     }
     catch (e) {}
 
-    const tracks = [];
-    if (shelf)
+    const parseRow = (c) =>
     {
-      for (const c of shelf.contents || [])
-      {
-        if (!c.musicResponsiveListItemRenderer) continue;
-        const r = c.musicResponsiveListItemRenderer;
-        const it = parseListRow(r);
-        if (!it.title) continue;
-        let dur = "";
-        try { dur = firstRun(r.fixedColumns[0].musicResponsiveListItemFixedColumnRenderer.text); } catch (e) {}
-        tracks.push({ title: it.title, sub: it.sub, id: it.id, kind: it.kind, thumb: it.thumb, dur: dur, liked: it.liked, artists: it.artists, album: it.album, setVideoId: it.setVideoId });
-      }
+      if (!c || !c.musicResponsiveListItemRenderer) return null;
+      const r = c.musicResponsiveListItemRenderer;
+      const it = parseListRow(r);
+      if (!it.title) return null;
+      let dur = "";
+      try { dur = firstRun(r.fixedColumns[0].musicResponsiveListItemFixedColumnRenderer.text); } catch (e) {}
+      return { title: it.title, sub: it.sub, id: it.id, kind: it.kind, thumb: it.thumb, dur: dur, liked: it.liked, artists: it.artists, album: it.album, setVideoId: it.setVideoId };
+    };
+    // The continuation token for the next page sits on the trailing continuationItemRenderer.
+    const tokenOf = (contents) =>
+    {
+      const last = (contents || [])[(contents || []).length - 1];
+      try { if (last && last.continuationItemRenderer) return last.continuationItemRenderer.continuationEndpoint.continuationCommand.token; } catch (e) {}
+      return null;
+    };
+
+    const tracks = [];
+    let contents = shelf ? (shelf.contents || []) : [];
+    for (const c of contents) { const t = parseRow(c); if (t) tracks.push(t); }
+    // A playlist must be fully visible, so page through the shelf's continuations until it ends,
+    // rather than keeping only the first ~100 rows. (Queue and mixes stay capped where they are.)
+    let token = tokenOf(contents);
+    let guard = 0;
+    while (token && guard < 80)   // ~8000-track safety ceiling
+    {
+      guard++;
+      let r2 = null;
+      try { r2 = await browse(key, headers, { context: ctx, continuation: token }); } catch (e) { break; }
+      let more = [];
+      try { for (const a of r2.onResponseReceivedActions || []) if (a.appendContinuationItemsAction) { more = a.appendContinuationItemsAction.continuationItems; break; } } catch (e) {}
+      if (!more.length) { try { more = r2.continuationContents.musicPlaylistShelfContinuation.contents || []; } catch (e) {} }
+      if (!more.length) break;
+      for (const c of more) { const t = parseRow(c); if (t) tracks.push(t); }
+      token = tokenOf(more);
     }
-    return { title: title, author: author, meta: meta, cover: cover, id: id, editable: editable, tracks: tracks.slice(0, 200) };
+    return { title: title, author: author, meta: meta, cover: cover, id: id, editable: editable, tracks: tracks };
   }
 
   // Mutates a playlist via InnerTube edit_playlist (add / remove / move). Auth required.
@@ -562,6 +605,66 @@
     }
     else return;
     return editPlaylist(playlistId, actions);
+  };
+
+  // Scans a playlist for a videoId, paging with early exit. Lets a save warn on a duplicate the
+  // way YTM does (its own warning is client-side knowledge of the playlist's contents).
+  async function playlistHasVideo(playlistId, videoId)
+  {
+    const key = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_API_KEY") : null;
+    const ctx0 = window.ytcfg && window.ytcfg.get ? window.ytcfg.get("INNERTUBE_CONTEXT") : null;
+    if (!key || !ctx0 || !playlistId || !videoId) return false;
+    const ctx = JSON.parse(JSON.stringify(ctx0));
+    try { ctx.client.hl = "en"; } catch (e) {}
+    const headers = await authHeaders();
+    const vl = String(playlistId).indexOf("VL") === 0 ? String(playlistId) : "VL" + playlistId;
+    const idOf = (c) => { try { return c.musicResponsiveListItemRenderer ? parseListRow(c.musicResponsiveListItemRenderer).id : null; } catch (e) { return null; } };
+    const tokenOf = (contents) => { const last = (contents || [])[(contents || []).length - 1]; try { if (last && last.continuationItemRenderer) return last.continuationItemRenderer.continuationEndpoint.continuationCommand.token; } catch (e) {} return null; };
+    const hit = (arr) => (arr || []).some((c) => idOf(c) === videoId);
+    let resp = null;
+    try { resp = await browse(key, headers, { context: ctx, browseId: vl }); } catch (e) { return false; }
+    let contents = [];
+    try
+    {
+      const sl = resp.contents.twoColumnBrowseResultsRenderer.secondaryContents.sectionListRenderer.contents;
+      const shelf = (sl.find((s) => s.musicPlaylistShelfRenderer) || {}).musicPlaylistShelfRenderer;
+      contents = shelf ? shelf.contents || [] : [];
+    }
+    catch (e) {}
+    if (hit(contents)) return true;
+    let token = tokenOf(contents), guard = 0;
+    while (token && guard < 80)
+    {
+      guard++;
+      let r2 = null;
+      try { r2 = await browse(key, headers, { context: ctx, continuation: token }); } catch (e) { break; }
+      let more = [];
+      try { for (const a of r2.onResponseReceivedActions || []) if (a.appendContinuationItemsAction) { more = a.appendContinuationItemsAction.continuationItems; break; } } catch (e) {}
+      if (!more.length) { try { more = r2.continuationContents.musicPlaylistShelfContinuation.contents || []; } catch (e) {} }
+      if (!more.length) break;
+      if (hit(more)) return true;
+      token = tokenOf(more);
+    }
+    return false;
+  }
+
+  // Save-to-playlist with YTM's duplicate warning. Unless forced, it first checks whether the track
+  // is already there; if so it emits ytm-save-result {status:"dup"} so the UI can offer "Add anyway".
+  // Otherwise it adds and reports "added" or "error".
+  window.__tunedeckSaveToPlaylist = async function (playlistId, videoId, force)
+  {
+    if (!playlistId || !videoId) return;
+    try
+    {
+      if (!force && await playlistHasVideo(playlistId, videoId))
+      {
+        window.__TAURI__?.event?.emit("ytm-save-result", { playlistId: playlistId, videoId: videoId, status: "dup" });
+        return;
+      }
+      const ok = await editPlaylist(playlistId, [{ action: "ACTION_ADD_VIDEO", addedVideoId: videoId }]);
+      window.__TAURI__?.event?.emit("ytm-save-result", { playlistId: playlistId, videoId: videoId, status: ok ? "added" : "error" });
+    }
+    catch (e) { window.__TAURI__?.event?.emit("ytm-save-result", { playlistId: playlistId, videoId: videoId, status: "error" }); }
   };
 
   // Creates a new playlist. privacy: "PRIVATE" | "UNLISTED" | "PUBLIC". Returns the new id ("" on fail).
@@ -1111,6 +1214,7 @@
     else if (kind === "p") path = "/watch?list=" + String(id).replace(/^VL/, "");
     else if (kind === "b") path = "/browse/" + id;
     else path = "/watch?v=" + id;
+    tdDiag("play", kind || "v", id, "->", path);
     location.assign(path);
   };
 

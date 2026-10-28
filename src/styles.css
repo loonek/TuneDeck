@@ -519,6 +519,7 @@ body
 /* Toast */
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%) translateY(12px); z-index: 90; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast-act { margin-left: 12px; pointer-events: auto; vertical-align: middle; background: var(--accent); color: #fff; border: 0; border-radius: 7px; padding: 5px 11px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 
 @media (max-width: 860px)
 {

@@ -307,6 +307,18 @@ fn handle_command(line: &[u8], app: &AppHandle, queue_cache: &Option<String>, fe
             let idx: i64 = v["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(-1);
             if idx >= 0 { eval(app, &format!("window.__tunedeckQueueJump && window.__tunedeckQueueJump({idx})")); }
         }
+        "search" =>
+        {
+            // The device search button focuses the search box. The engine runs hidden, so raise the
+            // app window and focus its own search field instead of the engine's.
+            if let Some(w) = app.get_webview_window("main")
+            {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+                let _ = w.eval("window.__tunedeckFocusSearch && window.__tunedeckFocusSearch()");
+            }
+        }
         "playlist" =>
         {
             let id = v["id"].as_str().unwrap_or("");

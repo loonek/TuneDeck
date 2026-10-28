@@ -100,8 +100,7 @@ function openPlaylistPicker(videoId)
       row.innerHTML = `<span class="picker-th" style="${bg}"></span><span class="picker-n">${esc(p.title)}</span>`;
       row.addEventListener("click", () =>
       {
-        playlistEdit("add", p.openId || p.id, videoId);   // reader strips any VL prefix
-        toast(`Added to ${p.title}`);
+        saveToPlaylist(p.openId || p.id, videoId, p.title, false);   // warns on a duplicate (Add anyway)
         closePlaylistPicker();
       });
       list.appendChild(row);
@@ -134,6 +133,28 @@ function toast(msg)
   el.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+// A toast with one action button, used for YTM's "already in playlist - Add anyway" prompt. Stays
+// up longer so the button is clickable; the action closes it.
+function toastAction(msg, label, onClick)
+{
+  let el = document.getElementById("toast");
+  if (!el)
+  {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.className = "toast";
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<span></span><button class="toast-act"></button>`;
+  el.querySelector("span").textContent = msg;
+  el.querySelector(".toast-act").textContent = label;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  const close = () => el.classList.remove("show");
+  el.querySelector(".toast-act").addEventListener("click", () => { close(); onClick(); });
+  toastTimer = setTimeout(close, 6000);
 }
 
 // small confirm dialog (reuses the picker/modal shell); onYes runs on "Delete"
@@ -344,6 +365,18 @@ function playlistEdit(action, playlistId, a, b)
 {
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (core) core.invoke("playlist_edit", { action, playlistId, a: a || "", b: b || "" });
+}
+
+// Saves a track to a playlist. Unless forced, the engine warns if the track is already there and
+// the UI offers "Add anyway" (see the ytm-save-result listener). lastSave names the target for it.
+let lastSave = null;
+function saveToPlaylist(playlistId, videoId, title, force)
+{
+  const core = window.__TAURI__ && window.__TAURI__.core;
+  if (!core) return;
+  lastSave = { playlistId: playlistId, videoId: videoId, title: title };
+  if (!force) toast("Saving…");
+  core.invoke("save_to_playlist", { playlistId: playlistId, videoId: videoId, force: !!force });
 }
 
 // Creates a new playlist in the engine. privacy: "PRIVATE" | "UNLISTED" | "PUBLIC".
@@ -1606,6 +1639,15 @@ function listenToEngine()
     lastAcct = h;
   });
   ev.listen("ytm-accounts", (e) => { if (accountsRequested) { accountsRequested = false; openAccountPicker(e.payload || []); } });
+  ev.listen("ytm-save-result", (e) =>
+  {
+    const r = e.payload || {};
+    const name = (lastSave && lastSave.title) || "playlist";
+    if (r.status === "dup")
+      toastAction(`Already in ${name}`, "Add anyway", () => { if (lastSave) saveToPlaylist(lastSave.playlistId, lastSave.videoId, lastSave.title, true); });
+    else if (r.status === "added") toast(`Added to ${name}`);
+    else toast("Couldn't add to playlist");
+  });
   ev.listen("ytm-playlist-created", (e) =>
   {
     const o = e.payload || {};
@@ -1679,6 +1721,13 @@ function wireControls()
   {
     if (e.key === "Enter") { clearTimeout(searchTimer); doSearch(searchInput.value); }
   });
+
+  // Invoked by the serial bridge when the device search button is pressed.
+  window.__tunedeckFocusSearch = function ()
+  {
+    searchInput.focus();
+    searchInput.select();
+  };
 
   const modal = document.getElementById("settingsModal");
   document.getElementById("settingsBtn").addEventListener("click", () => { modal.classList.add("show"); loadSerialPorts(); renderSerialFeedPick(); renderPluginsTab(); });

@@ -216,6 +216,23 @@ fn playlist_edit(app: tauri::AppHandle, action: String, playlist_id: String, a: 
     }
 }
 
+// Saves a track to a playlist, warning on duplicates unless forced. The reader checks membership
+// and replies with the ytm-save-result event (dup / added / error).
+#[tauri::command]
+fn save_to_playlist(app: tauri::AppHandle, playlist_id: String, video_id: String, force: bool)
+{
+    if let Some(win) = app.get_webview_window("ytm")
+    {
+        let js = format!(
+            "window.__tunedeckSaveToPlaylist && window.__tunedeckSaveToPlaylist({}, {}, {})",
+            serde_json::to_string(&playlist_id).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(&video_id).unwrap_or_else(|_| "\"\"".into()),
+            if force { "true" } else { "false" }
+        );
+        let _ = win.eval(&js);
+    }
+}
+
 // Lists serial ports for the picker: [{name, label}], newest-friendly label with USB ids.
 #[tauri::command]
 fn list_serial_ports() -> Vec<serde_json::Value>
@@ -436,6 +453,10 @@ pub fn run() {
             )
             .title("Sign in")
             .inner_size(1000.0, 700.0)
+            // Play navigates the engine to a fresh page; a cold WebView2 profile has a low media
+            // engagement score, so Chromium blocks autoplay and the track loads paused. Lifting the
+            // gate keeps playback starting on every machine (the default wry flags are preserved).
+            .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required")
             .initialization_script(include_str!("../reader/main_world.js"))
             .visible(cfg!(debug_assertions));
             for s in scripts { builder = builder.initialization_script(s); }
@@ -521,7 +542,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet, play, control, open_playlist, item_action,
             queue_jump, queue_remove, queue_menu, queue_add, open_album, open_artist,
-            reload_feed, search, playlist_edit, create_playlist, delete_playlist, open_library,
+            reload_feed, search, playlist_edit, save_to_playlist, create_playlist, delete_playlist, open_library,
             list_serial_ports, set_serial_port, set_serial_opts,
             plugin_set_enabled, plugins_manifest, plugin_set_config,
             js_plugins_list, js_plugins_dir, plugin_inject_engine, plugin_http, is_demo,
