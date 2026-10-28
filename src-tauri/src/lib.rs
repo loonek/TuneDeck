@@ -537,6 +537,28 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move { check_update(uh).await; });
             }
 
+            // Diagnostics log: reset it for this session, then append every `td-diag` line the reader
+            // emits. One file, overwritten on each launch, so it only holds the latest session.
+            #[cfg(desktop)]
+            {
+                if let Ok(dir) = app.path().app_log_dir()
+                {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = dir.join("diag.log");
+                    let _ = std::fs::write(&path, "TuneDeck diagnostics (this session)\n");
+                    app.listen("td-diag", move |event|
+                    {
+                        let line: String = serde_json::from_str(event.payload())
+                            .unwrap_or_else(|_| event.payload().to_string());
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                        {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{line}");
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -4,23 +4,28 @@
   // runs first and suppresses its "unsaved changes" prompt on navigations.
   window.addEventListener("beforeunload", (e) => e.stopImmediatePropagation(), true);
 
-  // Optional diagnostics (off by default): set localStorage.tunedeckDiag = "1" in the engine window
-  // to log play requests and the post-load playback state, which surfaces autoplay being blocked.
+  // Diagnostics: always on, mirrored to the console and emitted as `td-diag` so Rust can append each
+  // line to a per-session log file. Covers play requests, post-load playback state (surfaces autoplay
+  // being blocked), and library-playlist fetch results.
   function tdDiag()
   {
-    try { if (localStorage.getItem("tunedeckDiag")) console.log.apply(console, ["[tunedeck]"].concat([].slice.call(arguments))); } catch (e) {}
+    try
+    {
+      const line = "[" + new Date().toLocaleTimeString() + "] "
+        + [].slice.call(arguments).map((a) => (a && typeof a === "object") ? JSON.stringify(a) : String(a)).join(" ");
+      console.log("[tunedeck]", line);
+      window.__TAURI__?.event?.emit("td-diag", line);
+    }
+    catch (e) {}
   }
   try
   {
-    if (localStorage.getItem("tunedeckDiag"))
+    setTimeout(() =>
     {
-      setTimeout(() =>
-      {
-        const v = document.querySelector("video");
-        tdDiag("post-load", location.pathname + location.search,
-          v ? { paused: v.paused, cur: Math.round(v.currentTime), dur: Math.round(v.duration || 0) } : "no video element");
-      }, 3000);
-    }
+      const v = document.querySelector("video");
+      tdDiag("post-load", location.pathname + location.search,
+        v ? { paused: v.paused, cur: Math.round(v.currentTime), dur: Math.round(v.duration || 0) } : "no video element");
+    }, 3000);
   }
   catch (e) {}
 
@@ -1122,13 +1127,14 @@
 
       let plItems = null;
       const pls = await fetchLibraryPlaylists();
+      tdDiag("library playlists:", pls ? (pls.items ? pls.items.length : 0) : "null (no key/ctx or parse failed)");
       if (pls) { plItems = pls.items || []; lastPlaylists = plItems; window.__TAURI__?.event?.emit("ytm-playlists", plItems); }
 
       try { sessionStorage.setItem("tunedeckFeedCache", JSON.stringify({ ts: Date.now(), feed: feed, playlists: plItems })); } catch (e) {}
       feedReady = true;
       return true;
     }
-    catch (e) { console.warn("[feed] failed", e); return false; }
+    catch (e) { console.warn("[feed] failed", e); tdDiag("feed/playlists load failed:", String(e)); return false; }
   }
 
   (function pushFeed()
